@@ -56,13 +56,25 @@ def quarter_label(dt: pd.Timestamp) -> str:
 
 def parse_vintage_label(col: str):
     """
-    Erwartet wie: ROUTPUT66Q2
-    gibt (yy, q) zurück -> (66, 2)
+    Liest Vintage-Labels robust aus Headern, z. B.:
+      - ROUTPUT66Q2
+      - 66Q2
+      - 1966Q2
+    Gibt (year, quarter) zurück.
     """
-    m = re.search(r"ROUTPUT(\d{2})Q([1-4])", str(col), re.IGNORECASE)
+    m = re.search(r"(?:ROUTPUT)?\s*(\d{2,4})\s*Q([1-4])", str(col), re.IGNORECASE)
     if not m:
         return None
-    return (int(m.group(1)), int(m.group(2)))
+
+    year_raw = int(m.group(1))
+    quarter = int(m.group(2))
+
+    if year_raw < 100:
+        year = 1900 + year_raw if year_raw >= 66 else 2000 + year_raw
+    else:
+        year = year_raw
+
+    return (year, quarter)
 
 
 def vintage_sort_key(col: str):
@@ -77,19 +89,20 @@ def vintage_sort_key(col: str):
     if parsed is None:
         return (float("inf"), float("inf"))
 
-    yy, q = parsed
-    full_year = 1900 + yy if yy >= 66 else 2000 + yy
-    return (full_year, q)
+    year, q = parsed
+    return (year, q)
 
 
-def target_vintage_for_quarter(dt: pd.Timestamp) -> str:
-    """
-    PhillyFed Vintage-Label nutzt 2-stellige Jahreszahl:
-    2020Q1 -> 20Q1 => ROUTPUT20Q1
-    """
-    p = pd.Period(dt, freq="Q")
-    yy = p.year % 100
-    return f"ROUTPUT{yy:02d}Q{p.quarter}"
+def vintage_period_to_column(columns: list[str]) -> dict[pd.Period, str]:
+    """Mappt Quarter-Periode auf exakt vorhandenen Headernamen aus den Rohdaten."""
+    out = {}
+    for col in columns:
+        parsed = parse_vintage_label(col)
+        if parsed is None:
+            continue
+        year, quarter = parsed
+        out[pd.Period(f"{year}Q{quarter}", freq="Q")] = col
+    return out
 
 
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
@@ -161,8 +174,8 @@ def compute_diagonal_qoq_saar(df: pd.DataFrame) -> pd.DataFrame:
     out = df[["Date"]].copy()
     out["Quarter"] = out["Date"].apply(quarter_label)
 
-    # Vintage pro Quartal bestimmen
-    out["Vintage_used"] = out["Date"].apply(target_vintage_for_quarter)
+    vintage_by_period = vintage_period_to_column([c for c in df.columns if c != "Date"])
+    out["Vintage_used"] = [vintage_by_period.get(pd.Period(dt, freq="Q")) for dt in out["Date"]]
 
     values_t = []
     values_tm1 = []
@@ -174,7 +187,12 @@ def compute_diagonal_qoq_saar(df: pd.DataFrame) -> pd.DataFrame:
 
     for dt in out["Date"]:
         q_period = pd.Period(dt, freq="Q")
-        vcol = target_vintage_for_quarter(dt)
+        vcol = vintage_by_period.get(q_period)
+
+        if not vcol:
+            values_t.append(float("nan"))
+            values_tm1.append(float("nan"))
+            continue
 
         # aktuelles Quartal t
         x_t = df_period.at[q_period, vcol] if (q_period in df_period.index and vcol in df_period.columns) else float("nan")
