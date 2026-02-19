@@ -167,25 +167,33 @@ def compute_diagonal_qoq_saar(df: pd.DataFrame) -> pd.DataFrame:
     values_t = []
     values_tm1 = []
 
-    df_idx = df.set_index("Date")
+    # Robust gegen unterschiedliche Date-Timestamps (Quarter-Start vs Quarter-End)
+    df_period = df.copy()
+    df_period["Quarter_period"] = pd.PeriodIndex(df_period["Date"], freq="Q")
+    df_period = df_period.set_index("Quarter_period")
 
     for dt in out["Date"]:
+        q_period = pd.Period(dt, freq="Q")
         vcol = target_vintage_for_quarter(dt)
 
         # aktuelles Quartal t
-        x_t = df_idx.at[dt, vcol] if (dt in df_idx.index and vcol in df_idx.columns) else float("nan")
+        x_t = df_period.at[q_period, vcol] if (q_period in df_period.index and vcol in df_period.columns) else float("nan")
 
-        # Vorquartal t-1
-        prev_dt = (pd.Period(dt, freq="Q") - 1).to_timestamp(how="end").normalize()
-        x_tm1 = df_idx.at[prev_dt, vcol] if (prev_dt in df_idx.index and vcol in df_idx.columns) else float("nan")
+        # Vorquartal t-1, gleiches Vintage
+        prev_period = q_period - 1
+        x_tm1 = (
+            df_period.at[prev_period, vcol]
+            if (prev_period in df_period.index and vcol in df_period.columns)
+            else float("nan")
+        )
 
         values_t.append(x_t)
         values_tm1.append(x_tm1)
 
-    out["x_t (t, vintage=t)"] = values_t
-    out["x_tm1 (t-1, same vintage)"] = values_tm1
+    out["Current_value"] = values_t
+    out["Previous_value"] = values_tm1
 
-    out["qoq_saar"] = ((out["x_t (t, vintage=t)"] / out["x_tm1 (t-1, same vintage)"]) ** 4 - 1) * 100
+    out["qoq_saar"] = ((out["Current_value"] / out["Previous_value"]) ** 4 - 1) * 100
 
     return out
 
@@ -250,14 +258,22 @@ st.dataframe(
     calc[
         [
             "Date",
-            "Quarter",
             "Vintage_used",
-            "x_t (t, vintage=t)",
-            "x_tm1 (t-1, same vintage)",
+            "Previous_value",
+            "Current_value",
             "qoq_saar",
             "robust_z_20y_qoq",
         ]
-    ],
+    ].rename(
+        columns={
+            "Date": "Datum",
+            "Vintage_used": "Vintage (zum Zeitpunkt)",
+            "Previous_value": "Letzter Wert (t-1, gleiches Vintage)",
+            "Current_value": "Aktueller Wert (t, gleiches Vintage)",
+            "qoq_saar": "QoQ SAAR (%)",
+            "robust_z_20y_qoq": "Robuster Z-Score (20 Jahre)",
+        }
+    ),
     use_container_width=True,
 )
 
@@ -285,8 +301,8 @@ Wähle ein Quartal. Du siehst dann exakt:
             {
                 "Quarter": row["Quarter"],
                 "Vintage_used": row["Vintage_used"],
-                "x_t (t, vintage=t)": row["x_t (t, vintage=t)"],
-                "x_tm1 (t-1, same vintage)": row["x_tm1 (t-1, same vintage)"],
+                "Current_value (t, vintage=t)": row["Current_value"],
+                "Previous_value (t-1, same vintage)": row["Previous_value"],
                 "QoQ SAAR": row["qoq_saar"],
             }
         )
