@@ -70,7 +70,14 @@ def parse_vintage_label(col: str):
     quarter = int(m.group(2))
 
     if year_raw < 100:
-        year = 1900 + year_raw if year_raw >= 66 else 2000 + year_raw
+        # Philly-Fed-Dateien enthalten oft 2-stellige Jahre (z. B. 47Q1, 00Q1, 24Q4).
+        # Starre Grenzen (z. B. ab 66 => 19xx) brechen für ältere Historien wie 1947.
+        # Deshalb wird das Jahrhundert relativ zum aktuellen Jahr aufgelöst:
+        # - Werte größer als das aktuelle yy (+1 Puffer) gehören ins 20. Jh.
+        # - sonst ins 21. Jh.
+        current_yy = pd.Timestamp.now().year % 100
+        pivot = current_yy + 1
+        year = 1900 + year_raw if year_raw > pivot else 2000 + year_raw
     else:
         year = year_raw
 
@@ -81,9 +88,7 @@ def vintage_sort_key(col: str):
     """
     Sortiert 2-stellige PhillyFed-Vintage-Jahre chronologisch.
 
-    Annahme für RTDSM-Reihe:
-    - 66..99 => 1966..1999
-    - 00..65 => 2000..2065
+    Dynamische Jahrhundert-Logik wie in parse_vintage_label().
     """
     parsed = parse_vintage_label(col)
     if parsed is None:
