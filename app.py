@@ -65,6 +65,23 @@ def parse_vintage_label(col: str):
     return (int(m.group(1)), int(m.group(2)))
 
 
+def vintage_sort_key(col: str):
+    """
+    Sortiert 2-stellige PhillyFed-Vintage-Jahre chronologisch.
+
+    Annahme für RTDSM-Reihe:
+    - 66..99 => 1966..1999
+    - 00..65 => 2000..2065
+    """
+    parsed = parse_vintage_label(col)
+    if parsed is None:
+        return (float("inf"), float("inf"))
+
+    yy, q = parsed
+    full_year = 1900 + yy if yy >= 66 else 2000 + yy
+    return (full_year, q)
+
+
 def target_vintage_for_quarter(dt: pd.Timestamp) -> str:
     """
     PhillyFed Vintage-Label nutzt 2-stellige Jahreszahl:
@@ -128,7 +145,7 @@ def load_vintage_matrix() -> pd.DataFrame:
         raise RuntimeError("Keine Vintage-Spalten im Format ROUTPUT##Q# erkannt. Header ggf. anders.")
 
     # Sortieren nach Vintage (yy, q)
-    vintage_cols = sorted(vintage_cols, key=lambda c: parse_vintage_label(c))
+    vintage_cols = sorted(vintage_cols, key=vintage_sort_key)
     df = df[["Date"] + vintage_cols]
 
     return df
