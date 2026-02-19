@@ -23,7 +23,10 @@ def parse_quarter_dates(date_series: pd.Series) -> pd.Series:
     missing = dt.isna()
     if missing.any():
         s = date_series.astype(str).str.strip()
-        extracted = s.str.extract(r"^(?P<year>\d{4})\s*[:\-/ ]?\s*Q(?P<q>[1-4])$", expand=True)
+        extracted = s.str.extract(
+            r"^(?P<year>\d{4})\s*[:\-/ ]?\s*(?:Q\s*)?(?P<q>[1-4])$",
+            expand=True,
+        )
         qmask = missing & extracted["year"].notna()
         if qmask.any():
             periods = pd.PeriodIndex(
@@ -62,7 +65,11 @@ def parse_vintage_label(col: str):
       - 1966Q2
     Gibt (year, quarter) zurück.
     """
-    m = re.search(r"(?:ROUTPUT)?\s*(\d{2,4})\s*Q([1-4])", str(col), re.IGNORECASE)
+    m = re.search(
+        r"(?:ROUTPUT)?\s*(\d{2,4})\s*[:\-/ ]?\s*(?:Q\s*)?([1-4])",
+        str(col),
+        re.IGNORECASE,
+    )
     if not m:
         return None
 
@@ -130,11 +137,10 @@ def load_vintage_matrix() -> pd.DataFrame:
     anchor = date_rows[0]
 
     # Vintage-Headerzeile: enthält mehrfach ROUTPUT##Q#
-    pat = re.compile(r"ROUTPUT\d{2}Q[1-4]", re.IGNORECASE)
     vintage_row = None
     for r in range(anchor, min(anchor + 12, len(raw))):
         row_vals = raw.iloc[r].astype(str).fillna("").tolist()
-        hits = sum(bool(pat.search(v)) for v in row_vals[1:])
+        hits = sum(parse_vintage_label(v) is not None for v in row_vals[1:])
         if hits >= 3:
             vintage_row = r
             break
@@ -152,6 +158,12 @@ def load_vintage_matrix() -> pd.DataFrame:
     df = df.dropna(how="all").dropna(axis=1, how="all")
     df["Date"] = parse_quarter_dates(df["Date"])
     df = df.dropna(subset=["Date"]).sort_values("Date")
+    if df.empty:
+        sample = raw.iloc[vintage_row + 1 : vintage_row + 11, 0].astype(str).tolist()
+        raise RuntimeError(
+            "Alle Date-Werte konnten nicht als Quartale geparst werden. "
+            f"Beispiele aus Date-Spalte: {sample}"
+        )
 
     value_cols = [c for c in df.columns if c != "Date"]
     df[value_cols] = df[value_cols].apply(pd.to_numeric, errors="coerce")
@@ -161,6 +173,11 @@ def load_vintage_matrix() -> pd.DataFrame:
     vintage_cols = [c for c in df.columns if c != "Date" and parse_vintage_label(c) is not None]
     if not vintage_cols:
         raise RuntimeError("Keine Vintage-Spalten im Format ROUTPUT##Q# erkannt. Header ggf. anders.")
+    if len(vintage_cols) < 3:
+        raise RuntimeError(
+            "Zu wenige Vintage-Spalten erkannt (<3). "
+            "Möglicherweise wurde die Header-Zeile nicht korrekt gefunden."
+        )
 
     # Sortieren nach Vintage (yy, q)
     vintage_cols = sorted(vintage_cols, key=vintage_sort_key)
