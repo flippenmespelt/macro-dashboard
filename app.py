@@ -1,3 +1,4 @@
+import bisect
 import io
 import re
 
@@ -23,7 +24,10 @@ def parse_quarter_dates(date_series: pd.Series) -> pd.Series:
     missing = dt.isna()
     if missing.any():
         s = date_series.astype(str).str.strip()
-        extracted = s.str.extract(r"^(?P<year>\d{4})\s*[:\-/ ]?\s*Q(?P<q>[1-4])$", expand=True)
+        extracted = s.str.extract(
+            r"^(?P<year>\d{4})\s*[:\-/ ]?\s*(?:Q\s*)?(?P<q>[1-4])$",
+            expand=True,
+        )
         qmask = missing & extracted["year"].notna()
         if qmask.any():
             periods = pd.PeriodIndex(
@@ -62,7 +66,11 @@ def parse_vintage_label(col: str):
       - 1966Q2
     Gibt (year, quarter) zurück.
     """
-    m = re.search(r"(?:ROUTPUT)?\s*(\d{2,4})\s*Q([1-4])", str(col), re.IGNORECASE)
+    m = re.search(
+        r"(?:ROUTPUT)?\s*(\d{2,4})\s*[:\-/ ]?\s*(?:Q\s*)?([1-4])",
+        str(col),
+        re.IGNORECASE,
+    )
     if not m:
         return None
 
@@ -130,11 +138,10 @@ def load_vintage_matrix() -> pd.DataFrame:
     anchor = date_rows[0]
 
     # Vintage-Headerzeile: enthält mehrfach ROUTPUT##Q#
-    pat = re.compile(r"ROUTPUT\d{2}Q[1-4]", re.IGNORECASE)
     vintage_row = None
     for r in range(anchor, min(anchor + 12, len(raw))):
         row_vals = raw.iloc[r].astype(str).fillna("").tolist()
-        hits = sum(bool(pat.search(v)) for v in row_vals[1:])
+        hits = sum(parse_vintage_label(v) is not None for v in row_vals[1:])
         if hits >= 3:
             vintage_row = r
             break
@@ -152,6 +159,12 @@ def load_vintage_matrix() -> pd.DataFrame:
     df = df.dropna(how="all").dropna(axis=1, how="all")
     df["Date"] = parse_quarter_dates(df["Date"])
     df = df.dropna(subset=["Date"]).sort_values("Date")
+    if df.empty:
+        sample = raw.iloc[vintage_row + 1 : vintage_row + 11, 0].astype(str).tolist()
+        raise RuntimeError(
+            "Alle Date-Werte konnten nicht als Quartale geparst werden. "
+            f"Beispiele aus Date-Spalte: {sample}"
+        )
 
     value_cols = [c for c in df.columns if c != "Date"]
     df[value_cols] = df[value_cols].apply(pd.to_numeric, errors="coerce")
@@ -161,6 +174,11 @@ def load_vintage_matrix() -> pd.DataFrame:
     vintage_cols = [c for c in df.columns if c != "Date" and parse_vintage_label(c) is not None]
     if not vintage_cols:
         raise RuntimeError("Keine Vintage-Spalten im Format ROUTPUT##Q# erkannt. Header ggf. anders.")
+    if len(vintage_cols) < 3:
+        raise RuntimeError(
+            "Zu wenige Vintage-Spalten erkannt (<3). "
+            "Möglicherweise wurde die Header-Zeile nicht korrekt gefunden."
+        )
 
     # Sortieren nach Vintage (yy, q)
     vintage_cols = sorted(vintage_cols, key=vintage_sort_key)
@@ -169,53 +187,74 @@ def load_vintage_matrix() -> pd.DataFrame:
     return df
 
 
-def compute_diagonal_qoq_saar(df: pd.DataFrame) -> pd.DataFrame:
+def compute_diagonal_delta(df: pd.DataFrame, lag_quarters: int = 1) -> pd.DataFrame:
     """
-    Für Quartal t:
-      x_t = df.loc[t, vintage(t)]
-      x_{t-1} = df.loc[t-1, vintage(t)]
-    QoQ SAAR = ((x_t/x_{t-1})^4 - 1) * 100
+    Für Beobachtungsquartal t:
+      - suche das früheste Vintage v >= t + lag_quarters, das für t einen Wert hat
+      - für sehr frühe Quartale (vor erstem Vintage) verwende die erste Vintage-Spalte
+      - x_t   = value(t, v)
+      - x_t-1 = value(t-1, v)
+      - delta = x_t - x_t-1
     """
     out = df[["Date"]].copy()
     out["Quarter"] = out["Date"].apply(quarter_label)
 
-    vintage_by_period = vintage_period_to_column([c for c in df.columns if c != "Date"])
-    out["Vintage_used"] = [vintage_by_period.get(pd.Period(dt, freq="Q")) for dt in out["Date"]]
+    df_period = df.copy()
+    df_period["Obs_period"] = pd.PeriodIndex(df_period["Date"], freq="Q")
+    df_period = df_period.set_index("Obs_period")
 
+    vintage_cols = [c for c in df.columns if c != "Date" and parse_vintage_label(c) is not None]
+    vintage_cols = sorted(vintage_cols, key=vintage_sort_key)
+
+    vintage_by_period = vintage_period_to_column(vintage_cols)
+    vintage_period_cols = sorted(vintage_by_period.items(), key=lambda kv: kv[0])
+    vintage_periods = [p for p, _ in vintage_period_cols]
+
+    first_vintage = vintage_periods[0] if vintage_periods else None
+
+    used_cols = []
     values_t = []
     values_tm1 = []
 
-    # Robust gegen unterschiedliche Date-Timestamps (Quarter-Start vs Quarter-End)
-    df_period = df.copy()
-    df_period["Quarter_period"] = pd.PeriodIndex(df_period["Date"], freq="Q")
-    df_period = df_period.set_index("Quarter_period")
-
     for dt in out["Date"]:
-        q_period = pd.Period(dt, freq="Q")
-        vcol = vintage_by_period.get(q_period)
+        t = pd.Period(dt, freq="Q")
+        desired = t + lag_quarters
 
-        if not vcol:
+        # Für Historie vor dem ersten verfügbaren Vintage:
+        # Werte direkt aus der ersten Vintage-Spalte ziehen (z. B. ROUTPUT65Q4 für 1947..1965).
+        if first_vintage is not None and desired < first_vintage:
+            i = 0
+        else:
+            i = bisect.bisect_left(vintage_periods, desired)
+
+        vcol = None
+        while i < len(vintage_period_cols):
+            _, col = vintage_period_cols[i]
+            val = df_period.at[t, col] if (t in df_period.index) else float("nan")
+            if pd.notna(val):
+                vcol = col
+                break
+            i += 1
+
+        used_cols.append(vcol)
+
+        if vcol is None or (t not in df_period.index):
             values_t.append(float("nan"))
             values_tm1.append(float("nan"))
             continue
 
-        # aktuelles Quartal t
-        x_t = df_period.at[q_period, vcol] if (q_period in df_period.index and vcol in df_period.columns) else float("nan")
-
-        # Vorquartal t-1, gleiches Vintage
-        prev_period = q_period - 1
-        x_tm1 = (
-            df_period.at[prev_period, vcol]
-            if (prev_period in df_period.index and vcol in df_period.columns)
-            else float("nan")
-        )
+        x_t = df_period.at[t, vcol]
+        prev = t - 1
+        x_tm1 = df_period.at[prev, vcol] if (prev in df_period.index) else float("nan")
 
         values_t.append(x_t)
         values_tm1.append(x_tm1)
 
+    out["Vintage_used"] = used_cols
     out["Current_value"] = values_t
     out["Previous_value"] = values_tm1
 
+    out["delta"] = out["Current_value"] - out["Previous_value"]
     out["qoq_saar"] = ((out["Current_value"] / out["Previous_value"]) ** 4 - 1) * 100
 
     return out
@@ -261,20 +300,20 @@ except Exception as e:
     st.error(f"Fehler beim Laden/Parsen der Excel-Datei: {e}")
     st.stop()
 
-calc = compute_diagonal_qoq_saar(matrix)
+calc = compute_diagonal_delta(matrix, lag_quarters=1)
 
 WINDOW_Q = 20 * 4  # 20 Jahre
-z, z_med, z_mad, z_denom = rolling_robust_z(calc["qoq_saar"], WINDOW_Q)
-calc["robust_z_20y_qoq"] = z
+z, z_med, z_mad, z_denom = rolling_robust_z(calc["delta"], WINDOW_Q)
+calc["robust_z_20y_delta"] = z
 calc["z_median_20y"] = z_med
 calc["z_mad_20y"] = z_mad
 calc["z_denom_20y"] = z_denom
 
-st.subheader("QoQ SAAR (berechnet als: x(t,v=t) vs x(t-1,v=t))")
-st.line_chart(calc.set_index("Date")["qoq_saar"])
+st.subheader("Änderung (delta) = x(t, vintage≈t+1) - x(t-1, gleiches vintage)")
+st.line_chart(calc.set_index("Date")["delta"])
 
-st.subheader("Robuster Z-Score (Median/MAD, rollend 20 Jahre) auf QoQ SAAR")
-st.line_chart(calc.set_index("Date")["robust_z_20y_qoq"])
+st.subheader("Robuster Z-Score (Median/MAD, rollend 20 Jahre) auf delta")
+st.line_chart(calc.set_index("Date")["robust_z_20y_delta"])
 
 st.subheader("Berechnete Tabelle")
 st.dataframe(
@@ -284,17 +323,17 @@ st.dataframe(
             "Vintage_used",
             "Previous_value",
             "Current_value",
-            "qoq_saar",
-            "robust_z_20y_qoq",
+            "delta",
+            "robust_z_20y_delta",
         ]
     ].rename(
         columns={
             "Date": "Datum",
-            "Vintage_used": "Vintage (zum Zeitpunkt)",
-            "Previous_value": "Letzter Wert (t-1, gleiches Vintage)",
-            "Current_value": "Aktueller Wert (t, gleiches Vintage)",
-            "qoq_saar": "QoQ SAAR (%)",
-            "robust_z_20y_qoq": "Robuster Z-Score (20 Jahre)",
+            "Vintage_used": "Vintage (genutzt)",
+            "Previous_value": "Wert (t-1, gleiches Vintage)",
+            "Current_value": "Wert (t, gleiches Vintage)",
+            "delta": "Änderung (t - (t-1))",
+            "robust_z_20y_delta": "Robuster Z-Score (20 Jahre)",
         }
     ),
     use_container_width=True,
@@ -305,13 +344,13 @@ with st.expander("🔎 Trace / Nachvollziehen wie Excel"):
         """
 Wähle ein Quartal. Du siehst dann exakt:
 - **welche Vintage-Spalte** verwendet wurde,
-- **welche zwei Werte** in die QoQ-Formel gehen,
+- **welche zwei Werte** in die delta-Formel gehen,
 - sowie **Median/MAD/Nenner** des 20y-Fensters für den robusten Z-Score.
 """
     )
 
     # wähle ein Quartal, das Z-Score hat
-    selectable = calc.dropna(subset=["robust_z_20y_qoq"]).copy()
+    selectable = calc.dropna(subset=["robust_z_20y_delta"]).copy()
     if selectable.empty:
         st.info("Noch keine Z-Score-Werte (zu wenig Historie für 20 Jahre Lookback).")
     else:
@@ -319,14 +358,14 @@ Wähle ein Quartal. Du siehst dann exakt:
         q = st.selectbox("Quartal auswählen", options, index=len(options) - 1)
 
         row = selectable.loc[selectable["Quarter"] == q].iloc[0]
-        st.markdown("### QoQ-Input")
+        st.markdown("### Delta-Input")
         st.write(
             {
                 "Quarter": row["Quarter"],
                 "Vintage_used": row["Vintage_used"],
-                "Current_value (t, vintage=t)": row["Current_value"],
+                "Current_value (t, vintage≈t+1)": row["Current_value"],
                 "Previous_value (t-1, same vintage)": row["Previous_value"],
-                "QoQ SAAR": row["qoq_saar"],
+                "delta": row["delta"],
             }
         )
 
@@ -337,7 +376,7 @@ Wähle ein Quartal. Du siehst dann exakt:
                 "Median(window)": row["z_median_20y"],
                 "MAD(window)": row["z_mad_20y"],
                 "Denom = 1.4826 * MAD": row["z_denom_20y"],
-                "Robust Z": row["robust_z_20y_qoq"],
+                "Robust Z": row["robust_z_20y_delta"],
             }
         )
 
