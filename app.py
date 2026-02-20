@@ -423,6 +423,27 @@ else:
         ffr_next_release = None
         ffr_error = exc
 
+    try:
+        m2_obs = fetch_fred_series_observations("M2SL")
+        m2_obs = m2_obs.dropna(subset=["value"]).sort_values("date")
+        m2_obs["yoy_pct"] = (m2_obs["value"] / m2_obs["value"].shift(12) - 1) * 100
+
+        window_m = 20 * 12
+        m2_z, m2_med, m2_mad, m2_denom = rolling_robust_z(m2_obs["yoy_pct"], window_m)
+        m2_obs["robust_z_20y_yoy"] = m2_z
+        m2_obs["z_median_20y_yoy"] = m2_med
+        m2_obs["z_mad_20y_yoy"] = m2_mad
+        m2_obs["z_denom_20y_yoy"] = m2_denom
+
+        m2_latest = m2_obs.dropna(subset=["yoy_pct"]).tail(1)
+        m2_next_release = fetch_fred_next_release_date_from_page("M2SL")
+        m2_error = None
+    except Exception as exc:
+        m2_obs = pd.DataFrame(columns=["date", "value", "yoy_pct", "robust_z_20y_yoy"])
+        m2_latest = pd.DataFrame()
+        m2_next_release = None
+        m2_error = exc
+
     summary_rows = [
         {
             "Serie": "GDP",
@@ -456,6 +477,23 @@ else:
             }
         )
 
+    if not m2_latest.empty:
+        summary_rows.append(
+            {
+                "Serie": "M2",
+                "Letztes Datum": m2_latest["date"].iloc[0].date(),
+                "Aktuell": float(m2_latest["yoy_pct"].iloc[0]),
+                "Z-Score": (
+                    float(m2_latest["robust_z_20y_yoy"].iloc[0])
+                    if pd.notna(m2_latest["robust_z_20y_yoy"].iloc[0])
+                    else float("nan")
+                ),
+                "Next Release": m2_next_release if m2_next_release else "siehe FRED Series Page",
+                "Einheit": "% YoY",
+                "YoY absolut": float("nan"),
+            }
+        )
+
     summary = pd.DataFrame(summary_rows)
 
     st.subheader("Kompakt-Dashboard")
@@ -469,6 +507,7 @@ else:
 
     st.caption(f"Quelle Next Release GDP: {BEA_SCHEDULE_URL}")
     st.caption("Quelle FFR & Next Release: https://fred.stlouisfed.org/series/FEDFUNDS")
+    st.caption("Quelle M2 & Next Release: https://fred.stlouisfed.org/series/M2SL")
 
     selected = "GDP"
     if event and event.selection and event.selection.rows:
@@ -487,6 +526,23 @@ else:
             st.subheader("FFR YoY absolut (Differenz zu vor 12 Monaten)")
             st.line_chart(ffr_obs.set_index("date")["yoy_abs"])
             st.dataframe(ffr_obs, use_container_width=True)
+    elif selected == "M2":
+        st.header("M2 Details")
+        if m2_error:
+            st.warning(f"M2 konnte nicht geladen werden: {m2_error}")
+        elif m2_obs.empty:
+            st.warning("M2-Zeitreihe enthält keine Werte.")
+        else:
+            st.subheader("M2 YoY Change (%)")
+            st.line_chart(m2_obs.set_index("date")["yoy_pct"])
+
+            st.subheader("Robuster Z-Score (20 Jahre) auf YoY (%)")
+            st.line_chart(m2_obs.set_index("date")["robust_z_20y_yoy"])
+
+            st.dataframe(
+                m2_obs[["date", "value", "yoy_pct", "robust_z_20y_yoy"]],
+                use_container_width=True,
+            )
     else:
         st.header("GDP Details")
         st.subheader("RGDP QoQ SAAR")
