@@ -3,6 +3,7 @@ import io
 import re
 import datetime as dt
 
+import altair as alt
 import pandas as pd
 import requests
 import streamlit as st
@@ -395,7 +396,41 @@ else:
     st.caption(f"Quelle Next Release: {BEA_SCHEDULE_URL}")
 
 st.subheader("RGDP QoQ SAAR")
-st.line_chart(calc.set_index("Date")["qoq_saar"])
+chart_df = calc.dropna(subset=["qoq_saar"]).copy()
+chart_df["tooltip_rechenweg"] = (
+    "Vintage: "
+    + chart_df["Vintage_used"].astype(str)
+    + "\nWert t: "
+    + chart_df["Current_value"].map(lambda x: f"{x:,.2f}" if pd.notna(x) else "NA")
+    + "\nWert t-1: "
+    + chart_df["Previous_value"].map(lambda x: f"{x:,.2f}" if pd.notna(x) else "NA")
+    + "\nQoQ SAAR: "
+    + chart_df["qoq_saar"].map(lambda x: f"{x:.2f}%" if pd.notna(x) else "NA")
+    + "\nZ: "
+    + chart_df["robust_z_20y_delta"].map(
+        lambda x: f"{x:.2f}" if pd.notna(x) else "NA"
+    )
+)
+
+qoq_chart = (
+    alt.Chart(chart_df)
+    .mark_line(point=True)
+    .encode(
+        x=alt.X("Date:T", title="Datum"),
+        y=alt.Y("qoq_saar:Q", title="QoQ SAAR (%)"),
+        tooltip=[
+            alt.Tooltip("Date:T", title="Datum"),
+            alt.Tooltip("Quarter:N", title="Quartal"),
+            alt.Tooltip("qoq_saar:Q", title="QoQ SAAR (%)", format=".2f"),
+            alt.Tooltip(
+                "robust_z_20y_delta:Q", title="Robuster Z-Score (20 Jahre)", format=".2f"
+            ),
+            alt.Tooltip("tooltip_rechenweg:N", title="Details"),
+        ],
+    )
+    .interactive()
+)
+st.altair_chart(qoq_chart, use_container_width=True)
 
 st.subheader("RGDP QoQ SAAR Robuster Z-Score 20y")
 st.line_chart(calc.set_index("Date")["robust_z_20y_delta"])
