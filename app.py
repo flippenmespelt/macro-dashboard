@@ -362,6 +362,13 @@ def fetch_fred_series_observations(series_id: str) -> pd.DataFrame:
     return obs[["date", "value"]]
 
 
+def add_yoy_absolute_change(obs: pd.DataFrame, periods: int = 12) -> pd.DataFrame:
+    """Berechnet die absolute YoY-Veränderung für monatliche Reihen (z. B. FEDFUNDS)."""
+    out = obs.copy()
+    out["yoy_abs"] = out["value"] - out["value"].shift(periods)
+    return out
+
+
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
 def fetch_fred_next_release_date_from_page(series_id: str) -> str | None:
     url = f"https://fred.stlouisfed.org/series/{series_id}"
@@ -406,6 +413,7 @@ else:
 
     try:
         ffr_obs = fetch_fred_series_observations("FEDFUNDS")
+        ffr_obs = add_yoy_absolute_change(ffr_obs, periods=12)
         ffr_latest = ffr_obs.dropna(subset=["value"]).tail(1)
         ffr_next_release = fetch_fred_next_release_date_from_page("FEDFUNDS")
         ffr_error = None
@@ -427,6 +435,7 @@ else:
             ),
             "Next Release": next_release if next_release else "siehe BEA Schedule",
             "Einheit": "% (SAAR)",
+            "YoY absolut": float("nan"),
         }
     ]
 
@@ -439,6 +448,11 @@ else:
                 "Z-Score": float("nan"),
                 "Next Release": ffr_next_release if ffr_next_release else "siehe FRED Series Page",
                 "Einheit": "% p.a.",
+                "YoY absolut": (
+                    float(ffr_latest["yoy_abs"].iloc[0])
+                    if pd.notna(ffr_latest["yoy_abs"].iloc[0])
+                    else float("nan")
+                ),
             }
         )
 
@@ -470,6 +484,8 @@ else:
         else:
             st.subheader("FFR Verlauf (FEDFUNDS)")
             st.line_chart(ffr_obs.set_index("date")["value"])
+            st.subheader("FFR YoY absolut (Differenz zu vor 12 Monaten)")
+            st.line_chart(ffr_obs.set_index("date")["yoy_abs"])
             st.dataframe(ffr_obs, use_container_width=True)
     else:
         st.header("GDP Details")
