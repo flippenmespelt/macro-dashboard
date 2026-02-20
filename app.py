@@ -7,6 +7,7 @@ import requests
 import streamlit as st
 
 EXCEL_URL = "https://www.philadelphiafed.org/-/media/FRBP/Assets/Surveys-And-Data/real-time-data/data-files/xlsx/ROUTPUTQvQd.xlsx?sc_lang=en&hash=34FA1C6BF0007996E1885C8C32E3BEF9"
+BEA_GDP_URL = "https://www.bea.gov/data/gdp/gross-domestic-product"
 
 st.set_page_config(page_title="Macro Dashboard", layout="wide")
 
@@ -291,6 +292,18 @@ def rolling_robust_z(series: pd.Series, window: int):
     return z, med_s, mad_s, denom_s
 
 
+@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
+def fetch_bea_next_release(url: str) -> str | None:
+    response = requests.get(url, timeout=60)
+    response.raise_for_status()
+
+    html = re.sub(r"\s+", " ", response.text)
+    match = re.search(r"Next\s*Release\s*:?\s*([^<]{5,120})", html, flags=re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(1).strip(" .")
+
+
 # ---------------- UI ----------------
 st.title("Macro Dashboard – Philly Fed RTDSM (Diagonal Vintage)")
 st.caption("Quelle")
@@ -310,6 +323,38 @@ calc["robust_z_20y_delta"] = z
 calc["z_median_20y"] = z_med
 calc["z_mad_20y"] = z_mad
 calc["z_denom_20y"] = z_denom
+
+latest = calc.dropna(subset=["qoq_saar"]).sort_values("Date").tail(1)
+if latest.empty:
+    st.warning("Noch keine gültigen QoQ-SAAR-Werte vorhanden.")
+else:
+    summary = pd.DataFrame(
+        [
+            {
+                "Serie": "GDP",
+                "Letztes Datum": latest["Date"].iloc[0].date(),
+                "QoQ SAAR (%)": float(latest["qoq_saar"].iloc[0]),
+                "Z-Score": (
+                    float(latest["robust_z_20y_delta"].iloc[0])
+                    if pd.notna(latest["robust_z_20y_delta"].iloc[0])
+                    else float("nan")
+                ),
+            }
+        ]
+    )
+
+    st.subheader("Key Metrics")
+    st.dataframe(summary, use_container_width=True)
+
+    try:
+        next_release = fetch_bea_next_release(BEA_GDP_URL)
+    except Exception:
+        next_release = None
+
+    if next_release:
+        st.caption(f"Next advance estimate release date (BEA): {next_release}")
+    else:
+        st.caption(f"Next advance estimate release date: siehe {BEA_GDP_URL}")
 
 st.subheader("RGDP QoQ SAAR")
 st.line_chart(calc.set_index("Date")["qoq_saar"])
