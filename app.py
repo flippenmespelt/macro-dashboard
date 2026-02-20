@@ -524,6 +524,7 @@ else:
             st.subheader("FFR Verlauf (FEDFUNDS)")
             st.line_chart(ffr_obs.set_index("date")["value"])
             st.subheader("FFR YoY absolut (Differenz zu vor 12 Monaten)")
+            st.markdown("**Formel:** `YoY absolut = value_t - value_(t-12)`")
             st.line_chart(ffr_obs.set_index("date")["yoy_abs"])
             st.dataframe(ffr_obs, use_container_width=True)
     elif selected == "M2":
@@ -534,9 +535,13 @@ else:
             st.warning("M2-Zeitreihe enthält keine Werte.")
         else:
             st.subheader("M2 YoY Change (%)")
+            st.markdown("**Formel:** `YoY (%) = ((value_t / value_(t-12)) - 1) * 100`")
             st.line_chart(m2_obs.set_index("date")["yoy_pct"])
 
             st.subheader("Robuster Z-Score (20 Jahre) auf YoY (%)")
+            st.markdown(
+                "**Formel:** `Robust Z = (YoY_t - Median(20y-Fenster)) / (1.4826 * MAD(20y-Fenster))`"
+            )
             st.line_chart(m2_obs.set_index("date")["robust_z_20y_yoy"])
 
             st.dataframe(
@@ -546,9 +551,13 @@ else:
     else:
         st.header("GDP Details")
         st.subheader("RGDP QoQ SAAR")
+        st.markdown("**Formel:** `QoQ SAAR (%) = (((Current_value / Previous_value)^4) - 1) * 100`")
         st.line_chart(calc.set_index("Date")["qoq_saar"])
 
         st.subheader("RGDP QoQ SAAR Robuster Z-Score 20y")
+        st.markdown(
+            "**Formel:** `Robust Z = (delta_t - Median(20y-Fenster)) / (1.4826 * MAD(20y-Fenster))`"
+        )
         st.line_chart(calc.set_index("Date")["robust_z_20y_delta"])
 
         st.subheader("Berechnete Tabelle")
@@ -573,47 +582,6 @@ else:
                 }
             ),
             use_container_width=True,
-        )
-
-with st.expander("🔎 Trace / Nachvollziehen wie Excel"):
-    st.markdown(
-        """
-Wähle ein Quartal. Du siehst dann exakt:
-- **welche Vintage-Spalte** verwendet wurde,
-- **welche zwei Werte** in die delta-Formel gehen,
-- sowie **Median/MAD/Nenner** des 20y-Fensters für den robusten Z-Score.
-"""
-    )
-
-    # wähle ein Quartal, das Z-Score hat
-    selectable = calc.dropna(subset=["robust_z_20y_delta"]).copy()
-    if selectable.empty:
-        st.info("Noch keine Z-Score-Werte (zu wenig Historie für 20 Jahre Lookback).")
-    else:
-        options = list(selectable["Quarter"].values)
-        q = st.selectbox("Quartal auswählen", options, index=len(options) - 1)
-
-        row = selectable.loc[selectable["Quarter"] == q].iloc[0]
-        st.markdown("### Delta-Input")
-        st.write(
-            {
-                "Quarter": row["Quarter"],
-                "Vintage_used": row["Vintage_used"],
-                "Current_value (t, vintage≈t+1)": row["Current_value"],
-                "Previous_value (t-1, same vintage)": row["Previous_value"],
-                "delta": row["delta"],
-            }
-        )
-
-        st.markdown("### Z-Score-Input (20y, robust wie Sheets)")
-        st.write(
-            {
-                "Lookback (quarters)": WINDOW_Q,
-                "Median(window)": row["z_median_20y"],
-                "MAD(window)": row["z_mad_20y"],
-                "Denom = 1.4826 * MAD": row["z_denom_20y"],
-                "Robust Z": row["robust_z_20y_delta"],
-            }
         )
 
 with st.expander("Rohdaten-Matrix (Vintage-Spalten)"):
