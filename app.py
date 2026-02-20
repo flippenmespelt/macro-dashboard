@@ -220,12 +220,12 @@ def compute_diagonal_delta(df: pd.DataFrame, lag_quarters: int = 1) -> pd.DataFr
         desired = t + lag_quarters
 
         if first_vintage is not None and desired < first_vintage:
-            used_cols.append(None)
-            values_t.append(float("nan"))
-            values_tm1.append(float("nan"))
-            continue
-
-        i = bisect.bisect_left(vintage_periods, desired)
+            # Für sehr frühe Beobachtungen (z. B. 1947–1965) existieren keine
+            # vorherigen Vintages. Dann durchgehend die erste verfügbare
+            # Vintage-Spalte nutzen.
+            i = 0
+        else:
+            i = bisect.bisect_left(vintage_periods, desired)
 
         vcol = None
         while i < len(vintage_period_cols):
