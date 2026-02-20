@@ -1,13 +1,15 @@
 import bisect
 import io
 import re
+import datetime as dt
 
 import pandas as pd
 import requests
 import streamlit as st
+from bs4 import BeautifulSoup
 
 EXCEL_URL = "https://www.philadelphiafed.org/-/media/FRBP/Assets/Surveys-And-Data/real-time-data/data-files/xlsx/ROUTPUTQvQd.xlsx?sc_lang=en&hash=34FA1C6BF0007996E1885C8C32E3BEF9"
-BEA_GDP_URL = "https://www.bea.gov/data/gdp/gross-domestic-product"
+BEA_SCHEDULE_URL = "https://www.bea.gov/news/schedule"
 
 st.set_page_config(page_title="Macro Dashboard", layout="wide")
 
@@ -292,16 +294,49 @@ def rolling_robust_z(series: pd.Series, window: int):
     return z, med_s, mad_s, denom_s
 
 
-@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
-def fetch_bea_next_release(url: str) -> str | None:
-    response = requests.get(url, timeout=60)
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+def fetch_next_bea_gdp_advance_estimate() -> str | None:
+    response = requests.get(BEA_SCHEDULE_URL, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
     response.raise_for_status()
 
-    html = re.sub(r"\s+", " ", response.text)
-    match = re.search(r"Next\s*Release\s*:?\s*([^<]{5,120})", html, flags=re.IGNORECASE)
-    if not match:
-        return None
-    return match.group(1).strip(" .")
+    soup = BeautifulSoup(response.text, "html.parser")
+    text = soup.get_text("\n")
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+
+    year = None
+    for line in lines[:200]:
+        match = re.search(r"\bYear\s+(\d{4})\s+Release\b", line)
+        if match:
+            year = int(match.group(1))
+            break
+
+    if year is None:
+        year = dt.datetime.now().year
+
+    for i, line in enumerate(lines):
+        if "GDP (Advance Estimate)" not in line:
+            continue
+
+        date_str = None
+        time_str = None
+
+        for j in range(i - 1, max(-1, i - 15), -1):
+            if re.match(
+                r"^(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}$",
+                lines[j],
+            ):
+                date_str = lines[j]
+                break
+
+        for j in range(i - 1, max(-1, i - 15), -1):
+            if re.match(r"^\d{1,2}:\d{2}\s+(AM|PM)$", lines[j]):
+                time_str = lines[j]
+                break
+
+        if date_str and time_str:
+            return f"{date_str}, {year} – {time_str} ET"
+
+    return None
 
 
 # ---------------- UI ----------------
@@ -328,6 +363,17 @@ latest = calc.dropna(subset=["qoq_saar"]).sort_values("Date").tail(1)
 if latest.empty:
     st.warning("Noch keine gültigen QoQ-SAAR-Werte vorhanden.")
 else:
+    try:
+        next_release = fetch_next_bea_gdp_advance_estimate()
+    except Exception:
+        next_release = None
+
+    next_release_link = (
+        f"<a href='{BEA_SCHEDULE_URL}' target='_blank'>{next_release}</a>"
+        if next_release
+        else f"<a href='{BEA_SCHEDULE_URL}' target='_blank'>siehe BEA Schedule</a>"
+    )
+
     summary = pd.DataFrame(
         [
             {
@@ -339,22 +385,14 @@ else:
                     if pd.notna(latest["robust_z_20y_delta"].iloc[0])
                     else float("nan")
                 ),
+                "Next BEA Advance": next_release_link,
             }
         ]
     )
 
     st.subheader("Key Metrics")
-    st.dataframe(summary, use_container_width=True)
-
-    try:
-        next_release = fetch_bea_next_release(BEA_GDP_URL)
-    except Exception:
-        next_release = None
-
-    if next_release:
-        st.caption(f"Next advance estimate release date (BEA): {next_release}")
-    else:
-        st.caption(f"Next advance estimate release date: siehe {BEA_GDP_URL}")
+    st.markdown(summary.to_html(index=False, escape=False), unsafe_allow_html=True)
+    st.caption(f"Quelle Next Release: {BEA_SCHEDULE_URL}")
 
 st.subheader("RGDP QoQ SAAR")
 st.line_chart(calc.set_index("Date")["qoq_saar"])
