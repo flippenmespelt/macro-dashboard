@@ -309,10 +309,10 @@ calc["z_median_20y"] = z_med
 calc["z_mad_20y"] = z_mad
 calc["z_denom_20y"] = z_denom
 
-st.subheader("Änderung (delta) = x(t, vintage≈t+1) - x(t-1, gleiches vintage)")
+st.subheader("RGDP QoQ SAAR")
 st.line_chart(calc.set_index("Date")["qoq_saar"])
 
-st.subheader("Robuster Z-Score (Median/MAD, rollend 20 Jahre) auf delta")
+st.subheader("RGDP QoQ SAAR Robuster Z-Score 20y")
 st.line_chart(calc.set_index("Date")["robust_z_20y_delta"])
 
 st.subheader("Berechnete Tabelle")
