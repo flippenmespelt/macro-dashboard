@@ -6,6 +6,7 @@ import datetime as dt
 import pandas as pd
 import requests
 import streamlit as st
+import altair as alt
 from bs4 import BeautifulSoup
 
 EXCEL_URL = "https://www.philadelphiafed.org/-/media/FRBP/Assets/Surveys-And-Data/real-time-data/data-files/xlsx/ROUTPUTQvQd.xlsx?sc_lang=en&hash=34FA1C6BF0007996E1885C8C32E3BEF9"
@@ -294,6 +295,32 @@ def rolling_robust_z(series: pd.Series, window: int):
     return z, med_s, mad_s, denom_s
 
 
+def render_interactive_line_chart(data: pd.DataFrame, y_col: str, y_title: str):
+    chart_data = data.copy()
+
+    base = alt.Chart(chart_data).encode(
+        x=alt.X("Date:T", title="Datum"),
+        y=alt.Y(f"{y_col}:Q", title=y_title),
+    )
+
+    line = base.mark_line()
+
+    points = base.mark_circle(size=55, opacity=0).encode(
+        tooltip=[
+            alt.Tooltip("Quarter:N", title="Quartal"),
+            alt.Tooltip("Date:T", title="Datum"),
+            alt.Tooltip("Vintage_used:N", title="Vintage (genutzt)"),
+            alt.Tooltip("Previous_value:Q", title="Wert (t-1)", format=".4f"),
+            alt.Tooltip("Current_value:Q", title="Wert (t)", format=".4f"),
+            alt.Tooltip("delta:Q", title="Rechenweg: t - (t-1)", format=".4f"),
+            alt.Tooltip("qoq_saar:Q", title="QoQ SAAR (%)", format=".2f"),
+            alt.Tooltip("robust_z_20y_delta:Q", title="Robuster Z-Score", format=".2f"),
+        ]
+    )
+
+    st.altair_chart((line + points).interactive(), use_container_width=True)
+
+
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
 def fetch_next_bea_gdp_advance_estimate() -> str | None:
     response = requests.get(BEA_SCHEDULE_URL, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
@@ -395,10 +422,10 @@ else:
     st.caption(f"Quelle Next Release: {BEA_SCHEDULE_URL}")
 
 st.subheader("RGDP QoQ SAAR")
-st.line_chart(calc.set_index("Date")["qoq_saar"])
+render_interactive_line_chart(calc, "qoq_saar", "QoQ SAAR (%)")
 
 st.subheader("RGDP QoQ SAAR Robuster Z-Score 20y")
-st.line_chart(calc.set_index("Date")["robust_z_20y_delta"])
+render_interactive_line_chart(calc, "robust_z_20y_delta", "Robuster Z-Score")
 
 st.subheader("Berechnete Tabelle")
 st.dataframe(
