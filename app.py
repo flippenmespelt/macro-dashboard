@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 
 EXCEL_URL = "https://www.philadelphiafed.org/-/media/FRBP/Assets/Surveys-And-Data/real-time-data/data-files/xlsx/ROUTPUTQvQd.xlsx?sc_lang=en&hash=34FA1C6BF0007996E1885C8C32E3BEF9"
 BEA_SCHEDULE_URL = "https://www.bea.gov/news/schedule"
+FRED_SERIES_OBS_URL = "https://api.stlouisfed.org/fred/series/observations"
 
 st.set_page_config(page_title="Macro Dashboard", layout="wide")
 
@@ -339,6 +340,41 @@ def fetch_next_bea_gdp_advance_estimate() -> str | None:
     return None
 
 
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+def fetch_fred_series_observations(series_id: str) -> pd.DataFrame:
+    api_key = st.secrets["FRED_API_KEY"]
+    params = {
+        "series_id": series_id,
+        "api_key": api_key,
+        "file_type": "json",
+    }
+    response = requests.get(FRED_SERIES_OBS_URL, params=params, timeout=30)
+    response.raise_for_status()
+
+    data = response.json()
+    obs = pd.DataFrame(data.get("observations", []))
+    if obs.empty:
+        return pd.DataFrame(columns=["date", "value"])
+
+    obs["date"] = pd.to_datetime(obs["date"], errors="coerce")
+    obs["value"] = pd.to_numeric(obs["value"], errors="coerce")
+    obs = obs.dropna(subset=["date"]).sort_values("date")
+    return obs[["date", "value"]]
+
+
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+def fetch_fred_next_release_date_from_page(series_id: str) -> str | None:
+    url = f"https://fred.stlouisfed.org/series/{series_id}"
+    response = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+    response.raise_for_status()
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    text = " ".join(soup.get_text(" ").split())
+    match = re.search(r"Next Release Date:\s*([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})", text)
+
+    return match.group(1) if match else None
+
+
 # ---------------- UI ----------------
 st.title("Macro Dashboard – Philly Fed RTDSM (Diagonal Vintage)")
 st.caption("Quelle")
@@ -368,61 +404,104 @@ else:
     except Exception:
         next_release = None
 
-    next_release_link = (
-        f"<a href='{BEA_SCHEDULE_URL}' target='_blank'>{next_release}</a>"
-        if next_release
-        else f"<a href='{BEA_SCHEDULE_URL}' target='_blank'>siehe BEA Schedule</a>"
-    )
+    try:
+        ffr_obs = fetch_fred_series_observations("FEDFUNDS")
+        ffr_latest = ffr_obs.dropna(subset=["value"]).tail(1)
+        ffr_next_release = fetch_fred_next_release_date_from_page("FEDFUNDS")
+        ffr_error = None
+    except Exception as exc:
+        ffr_obs = pd.DataFrame(columns=["date", "value"])
+        ffr_latest = pd.DataFrame()
+        ffr_next_release = None
+        ffr_error = exc
 
-    summary = pd.DataFrame(
-        [
-            {
-                "Serie": "GDP",
-                "Letztes Datum": latest["Date"].iloc[0].date(),
-                "QoQ SAAR (%)": float(latest["qoq_saar"].iloc[0]),
-                "Z-Score": (
-                    float(latest["robust_z_20y_delta"].iloc[0])
-                    if pd.notna(latest["robust_z_20y_delta"].iloc[0])
-                    else float("nan")
-                ),
-                "Next BEA Advance": next_release_link,
-            }
-        ]
-    )
-
-    st.subheader("Key Metrics")
-    st.markdown(summary.to_html(index=False, escape=False), unsafe_allow_html=True)
-    st.caption(f"Quelle Next Release: {BEA_SCHEDULE_URL}")
-
-st.subheader("RGDP QoQ SAAR")
-st.line_chart(calc.set_index("Date")["qoq_saar"])
-
-st.subheader("RGDP QoQ SAAR Robuster Z-Score 20y")
-st.line_chart(calc.set_index("Date")["robust_z_20y_delta"])
-
-st.subheader("Berechnete Tabelle")
-st.dataframe(
-    calc[
-        [
-            "Date",
-            "Vintage_used",
-            "Previous_value",
-            "Current_value",
-            "delta",
-            "robust_z_20y_delta",
-        ]
-    ].rename(
-        columns={
-            "Date": "Datum",
-            "Vintage_used": "Vintage (genutzt)",
-            "Previous_value": "Wert (t-1, gleiches Vintage)",
-            "Current_value": "Wert (t, gleiches Vintage)",
-            "delta": "Änderung (t - (t-1))",
-            "robust_z_20y_delta": "Robuster Z-Score (20 Jahre)",
+    summary_rows = [
+        {
+            "Serie": "GDP",
+            "Letztes Datum": latest["Date"].iloc[0].date(),
+            "Aktuell": float(latest["qoq_saar"].iloc[0]),
+            "Z-Score": (
+                float(latest["robust_z_20y_delta"].iloc[0])
+                if pd.notna(latest["robust_z_20y_delta"].iloc[0])
+                else float("nan")
+            ),
+            "Next Release": next_release if next_release else "siehe BEA Schedule",
+            "Einheit": "% (SAAR)",
         }
-    ),
-    use_container_width=True,
-)
+    ]
+
+    if not ffr_latest.empty:
+        summary_rows.append(
+            {
+                "Serie": "FFR",
+                "Letztes Datum": ffr_latest["date"].iloc[0].date(),
+                "Aktuell": float(ffr_latest["value"].iloc[0]),
+                "Z-Score": float("nan"),
+                "Next Release": ffr_next_release if ffr_next_release else "siehe FRED Series Page",
+                "Einheit": "% p.a.",
+            }
+        )
+
+    summary = pd.DataFrame(summary_rows)
+
+    st.subheader("Kompakt-Dashboard")
+    event = st.dataframe(
+        summary,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+    )
+
+    st.caption(f"Quelle Next Release GDP: {BEA_SCHEDULE_URL}")
+    st.caption("Quelle FFR & Next Release: https://fred.stlouisfed.org/series/FEDFUNDS")
+
+    selected = "GDP"
+    if event and event.selection and event.selection.rows:
+        selected = summary.iloc[event.selection.rows[0]]["Serie"]
+
+    st.divider()
+    if selected == "FFR":
+        st.header("FFR Details")
+        if ffr_error:
+            st.warning(f"FFR konnte nicht geladen werden: {ffr_error}")
+        elif ffr_obs.empty:
+            st.warning("FFR-Zeitreihe enthält keine Werte.")
+        else:
+            st.subheader("FFR Verlauf (FEDFUNDS)")
+            st.line_chart(ffr_obs.set_index("date")["value"])
+            st.dataframe(ffr_obs, use_container_width=True)
+    else:
+        st.header("GDP Details")
+        st.subheader("RGDP QoQ SAAR")
+        st.line_chart(calc.set_index("Date")["qoq_saar"])
+
+        st.subheader("RGDP QoQ SAAR Robuster Z-Score 20y")
+        st.line_chart(calc.set_index("Date")["robust_z_20y_delta"])
+
+        st.subheader("Berechnete Tabelle")
+        st.dataframe(
+            calc[
+                [
+                    "Date",
+                    "Vintage_used",
+                    "Previous_value",
+                    "Current_value",
+                    "delta",
+                    "robust_z_20y_delta",
+                ]
+            ].rename(
+                columns={
+                    "Date": "Datum",
+                    "Vintage_used": "Vintage (genutzt)",
+                    "Previous_value": "Wert (t-1, gleiches Vintage)",
+                    "Current_value": "Wert (t, gleiches Vintage)",
+                    "delta": "Änderung (t - (t-1))",
+                    "robust_z_20y_delta": "Robuster Z-Score (20 Jahre)",
+                }
+            ),
+            use_container_width=True,
+        )
 
 with st.expander("🔎 Trace / Nachvollziehen wie Excel"):
     st.markdown(
