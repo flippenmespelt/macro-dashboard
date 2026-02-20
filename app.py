@@ -293,6 +293,8 @@ def rolling_robust_z(series: pd.Series, window: int):
 
 # ---------------- UI ----------------
 st.title("Macro Dashboard – Philly Fed RTDSM (Diagonal Vintage)")
+st.caption("Quelle")
+st.markdown(f"{EXCEL_URL}")
 
 try:
     matrix = load_vintage_matrix()
