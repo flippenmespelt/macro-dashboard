@@ -379,11 +379,37 @@ def build_local_summary_row(
     }
 
 
-def append_manual_value(file_path: str, date_value: dt.date, numeric_value: float) -> None:
-    date_str = pd.Timestamp(date_value).strftime("%Y-%m-%d")
-    line = f"{date_str}\t{numeric_value:.1f}\n"
-    with open(file_path, "a", encoding="utf-8") as f:
-        f.write(line)
+def upsert_manual_value(file_path: str, date_value: dt.date, numeric_value: float) -> None:
+    raw = pd.read_csv(file_path, sep=r"\t+|\s{2,}", engine="python", dtype=str)
+    if raw.shape[1] < 2:
+        raise RuntimeError(f"Datei {file_path} enthält nicht genug Spalten.")
+
+    date_col, value_col = raw.columns[:2]
+    work = raw.iloc[:, :2].copy()
+    work.columns = ["date_raw", "value_raw"]
+
+    work["date"] = pd.to_datetime(work["date_raw"], errors="coerce", dayfirst=False)
+    value_str = work["value_raw"].astype(str).str.strip().str.replace(",", ".", regex=False)
+    work["value"] = pd.to_numeric(value_str, errors="coerce")
+    work = work.dropna(subset=["date", "value"]).copy()
+
+    target_month = pd.Timestamp(date_value).to_period("M")
+    work = work[work["date"].dt.to_period("M") != target_month]
+
+    work = pd.concat(
+        [
+            work[["date", "value"]],
+            pd.DataFrame(
+                [{"date": pd.Timestamp(date_value).normalize(), "value": float(numeric_value)}]
+            ),
+        ],
+        ignore_index=True,
+    ).sort_values("date")
+
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(f"{date_col}\t{value_col}\n")
+        for _, row in work.iterrows():
+            f.write(f"{row['date'].strftime('%Y-%m-%d')}\t{row['value']:.1f}\n")
 
 
 def render_manual_entry_form(
@@ -399,18 +425,10 @@ def render_manual_entry_form(
         new_value = st.number_input(f"Wert ({series_name})", value=50.0, step=0.1, format="%.1f")
         submit = st.form_submit_button(f"{series_name}-Wert speichern")
         if submit:
-            month_exists = False
-            if not series_df.empty:
-                month_exists = (
-                    series_df["date"].dt.to_period("M") == pd.Timestamp(new_date).to_period("M")
-                ).any()
-
-            if month_exists:
-                st.error(f"Für diesen Monat ist bereits ein {series_name}-Wert vorhanden.")
-            else:
-                append_manual_value(file_path, new_date, new_value)
-                st.cache_data.clear()
-                st.rerun()
+            upsert_manual_value(file_path, new_date, new_value)
+            st.success(f"{series_name}-Wert gespeichert (Monat wurde aktualisiert oder ergänzt).")
+            st.cache_data.clear()
+            st.rerun()
 
 
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
@@ -630,7 +648,7 @@ else:
         use_container_width=True,
         hide_index=True,
         on_select="rerun",
-        selection_mode="single-row",
+        selection_mode=("single-row", "single-cell"),
     )
 
     st.caption(f"Quelle Next Release GDP: {BEA_SCHEDULE_URL}")
@@ -642,6 +660,17 @@ else:
     selected = "GDP"
     if event and event.selection and event.selection.rows:
         selected = summary.iloc[event.selection.rows[0]]["Serie"]
+    elif event and event.selection and event.selection.cells:
+        first_cell = event.selection.cells[0]
+        if isinstance(first_cell, dict):
+            row_idx = first_cell.get("row")
+        elif isinstance(first_cell, (tuple, list)) and first_cell:
+            row_idx = first_cell[0]
+        else:
+            row_idx = None
+
+        if isinstance(row_idx, int) and 0 <= row_idx < len(summary):
+            selected = summary.iloc[row_idx]["Serie"]
 
     st.divider()
     if selected == "FFR":
