@@ -379,27 +379,32 @@ def build_local_summary_row(
     }
 
 
-def missing_months(series_df: pd.DataFrame) -> pd.DatetimeIndex:
-    if series_df.empty:
-        return pd.DatetimeIndex([])
-
-    month_start = pd.to_datetime(series_df["date"], errors="coerce").dt.to_period("M").dt.to_timestamp()
-    month_start = month_start.dropna()
-    if month_start.empty:
-        return pd.DatetimeIndex([])
-
-    start = month_start.min()
-    end = month_start.max()
-    expected = pd.date_range(start=start, end=end, freq="MS")
-    actual = pd.DatetimeIndex(month_start.unique())
-    return expected.difference(actual)
-
-
 def append_manual_value(file_path: str, date_value: dt.date, numeric_value: float) -> None:
     date_str = pd.Timestamp(date_value).strftime("%Y-%m-%d")
     line = f"{date_str}\t{numeric_value:.1f}\n"
     with open(file_path, "a", encoding="utf-8") as f:
         f.write(line)
+
+
+def render_manual_entry_form(series_name: str, file_path: str, series_df: pd.DataFrame) -> None:
+    st.subheader(f"{series_name} manuell ergänzen")
+    with st.form(f"{series_name.lower()}_manual_entry"):
+        new_date = st.date_input(f"Datum ({series_name})", value=dt.date.today())
+        new_value = st.number_input(f"Wert ({series_name})", value=50.0, step=0.1, format="%.1f")
+        submit = st.form_submit_button(f"{series_name}-Wert speichern")
+        if submit:
+            month_exists = False
+            if not series_df.empty:
+                month_exists = (
+                    series_df["date"].dt.to_period("M") == pd.Timestamp(new_date).to_period("M")
+                ).any()
+
+            if month_exists:
+                st.error(f"Für diesen Monat ist bereits ein {series_name}-Wert vorhanden.")
+            else:
+                append_manual_value(file_path, new_date, new_value)
+                st.cache_data.clear()
+                st.rerun()
 
 
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
@@ -674,19 +679,8 @@ else:
         elif ism_obs.empty:
             st.warning("ISM-Zeitreihe enthält keine Werte.")
         else:
-            missing_ism = missing_months(ism_obs)
-            if len(missing_ism) > 0:
-                st.warning(
-                    f"Plausibilitätsprüfung: Es fehlen {len(missing_ism)} Monatswerte. "
-                    f"Erster fehlender Monat: {missing_ism[0].date()}"
-                )
-            else:
-                st.success("Plausibilitätsprüfung: Für jeden Monat liegt ein ISM-Wert vor.")
-
             st.subheader("ISM Index")
             st.line_chart(ism_obs.set_index("date")["value"])
-            st.subheader("Absolute Veränderung (Monat zu Monat)")
-            st.line_chart(ism_obs.set_index("date")["abs_change"])
             st.subheader("Normaler Z-Score (20 Jahre rollend) auf absolute Veränderung")
             st.markdown("**Formel:** `Z = (Δ_t - Mittelwert(20y)) / Standardabweichung(20y)`")
             st.line_chart(ism_obs.set_index("date")["zscore_20y_abs_change"])
@@ -703,23 +697,7 @@ else:
                 ],
                 use_container_width=True,
             )
-
-            st.subheader("ISM manuell ergänzen")
-            with st.form("ism_manual_entry"):
-                ism_new_date = st.date_input("Datum (ISM)", value=dt.date.today())
-                ism_new_value = st.number_input("Wert (ISM)", value=50.0, step=0.1, format="%.1f")
-                ism_submit = st.form_submit_button("ISM-Wert speichern")
-                if ism_submit:
-                    month_exists = (
-                        ism_obs["date"].dt.to_period("M")
-                        == pd.Timestamp(ism_new_date).to_period("M")
-                    ).any()
-                    if month_exists:
-                        st.error("Für diesen Monat ist bereits ein ISM-Wert vorhanden.")
-                    else:
-                        append_manual_value(ISM_FILE_PATH, ism_new_date, ism_new_value)
-                        st.cache_data.clear()
-                        st.rerun()
+        render_manual_entry_form("ISM", ISM_FILE_PATH, ism_obs)
     elif selected == "NMI":
         st.header("NMI Details")
         if nmi_error:
@@ -727,19 +705,8 @@ else:
         elif nmi_obs.empty:
             st.warning("NMI-Zeitreihe enthält keine Werte.")
         else:
-            missing_nmi = missing_months(nmi_obs)
-            if len(missing_nmi) > 0:
-                st.warning(
-                    f"Plausibilitätsprüfung: Es fehlen {len(missing_nmi)} Monatswerte. "
-                    f"Erster fehlender Monat: {missing_nmi[0].date()}"
-                )
-            else:
-                st.success("Plausibilitätsprüfung: Für jeden Monat liegt ein NMI-Wert vor.")
-
             st.subheader("NMI Index")
             st.line_chart(nmi_obs.set_index("date")["value"])
-            st.subheader("Absolute Veränderung (Monat zu Monat)")
-            st.line_chart(nmi_obs.set_index("date")["abs_change"])
             st.subheader("Normaler Z-Score (20 Jahre rollend) auf absolute Veränderung")
             st.markdown("**Formel:** `Z = (Δ_t - Mittelwert(20y)) / Standardabweichung(20y)`")
             st.line_chart(nmi_obs.set_index("date")["zscore_20y_abs_change"])
@@ -756,23 +723,7 @@ else:
                 ],
                 use_container_width=True,
             )
-
-            st.subheader("NMI manuell ergänzen")
-            with st.form("nmi_manual_entry"):
-                nmi_new_date = st.date_input("Datum (NMI)", value=dt.date.today())
-                nmi_new_value = st.number_input("Wert (NMI)", value=50.0, step=0.1, format="%.1f")
-                nmi_submit = st.form_submit_button("NMI-Wert speichern")
-                if nmi_submit:
-                    month_exists = (
-                        nmi_obs["date"].dt.to_period("M")
-                        == pd.Timestamp(nmi_new_date).to_period("M")
-                    ).any()
-                    if month_exists:
-                        st.error("Für diesen Monat ist bereits ein NMI-Wert vorhanden.")
-                    else:
-                        append_manual_value(NMI_FILE_PATH, nmi_new_date, nmi_new_value)
-                        st.cache_data.clear()
-                        st.rerun()
+        render_manual_entry_form("NMI", NMI_FILE_PATH, nmi_obs)
     else:
         st.header("GDP Details")
         st.subheader("RGDP QoQ SAAR")
