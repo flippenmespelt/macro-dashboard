@@ -2,6 +2,7 @@ import bisect
 import io
 import re
 import datetime as dt
+from pathlib import Path
 
 import pandas as pd
 import requests
@@ -11,8 +12,9 @@ from bs4 import BeautifulSoup
 EXCEL_URL = "https://www.philadelphiafed.org/-/media/FRBP/Assets/Surveys-And-Data/real-time-data/data-files/xlsx/ROUTPUTQvQd.xlsx?sc_lang=en&hash=34FA1C6BF0007996E1885C8C32E3BEF9"
 BEA_SCHEDULE_URL = "https://www.bea.gov/news/schedule"
 FRED_SERIES_OBS_URL = "https://api.stlouisfed.org/fred/series/observations"
-ISM_FILE_PATH = "ism.txt"
-NMI_FILE_PATH = "nmi.txt"
+BASE_DIR = Path(__file__).resolve().parent
+ISM_FILE_PATH = BASE_DIR / "ism.txt"
+NMI_FILE_PATH = BASE_DIR / "nmi.txt"
 ISM_PMI_URL = "https://www.ismworld.org/supply-management-news-and-reports/reports/ism-report-on-business/pmi/"
 ISM_SERVICES_URL = "https://www.ismworld.org/supply-management-news-and-reports/reports/ism-report-on-business/services/"
 
@@ -311,7 +313,7 @@ def rolling_normal_stats(series: pd.Series, window: int) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=15 * 60, show_spinner=False)
-def load_local_index_series(file_path: str) -> pd.DataFrame:
+def load_local_index_series(file_path: str | Path) -> pd.DataFrame:
     raw = pd.read_csv(file_path, sep=r"\t+|\s{2,}", engine="python", dtype=str)
     if raw.shape[1] < 2:
         raise RuntimeError(f"Datei {file_path} enthält nicht genug Spalten.")
@@ -339,7 +341,9 @@ def safe_float(value) -> float:
     return float(value) if pd.notna(value) else float("nan")
 
 
-def load_local_index_bundle(file_path: str) -> tuple[pd.DataFrame, pd.DataFrame, str | None, Exception | None]:
+def load_local_index_bundle(
+    file_path: str | Path,
+) -> tuple[pd.DataFrame, pd.DataFrame, str | None, Exception | None]:
     try:
         obs = load_local_index_series(file_path)
         latest = obs.dropna(subset=["value"]).tail(1)
@@ -379,26 +383,57 @@ def build_local_summary_row(
     }
 
 
-def upsert_manual_value(file_path: str, date_value: dt.date, numeric_value: float) -> None:
-    raw = pd.read_csv(file_path, sep=r"\t+|\s{2,}", engine="python", dtype=str)
-    if raw.shape[1] < 2:
-        raise RuntimeError(f"Datei {file_path} enthält nicht genug Spalten.")
+def upsert_manual_value(file_path: str | Path, date_value: dt.date, numeric_value: float) -> None:
+    file_path = Path(file_path)
+    if not file_path.exists():
+        raise RuntimeError(f"Datei {file_path} wurde nicht gefunden.")
 
-    date_col, value_col = raw.columns[:2]
-    work = raw.iloc[:, :2].copy()
-    work.columns = ["date_raw", "value_raw"]
+    lines = file_path.read_text(encoding="utf-8").splitlines()
+    if not lines:
+        raise RuntimeError(f"Datei {file_path} ist leer.")
 
-    work["date"] = pd.to_datetime(work["date_raw"], errors="coerce", dayfirst=False)
-    value_str = work["value_raw"].astype(str).str.strip().str.replace(",", ".", regex=False)
-    work["value"] = pd.to_numeric(value_str, errors="coerce")
-    work = work.dropna(subset=["date", "value"]).copy()
+    header = lines[0].strip()
+    if "	" in header:
+        date_col, value_col = [c.strip() for c in header.split("	", 1)]
+    else:
+        parts = re.split(r"\s{2,}", header)
+        if len(parts) < 2:
+            raise RuntimeError(f"Datei {file_path} enthält nicht genug Spalten.")
+        date_col, value_col = parts[0].strip(), parts[1].strip()
+
+    records: list[dict[str, object]] = []
+    for line in lines[1:]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        if "	" in stripped:
+            parts = [p.strip() for p in stripped.split("	", 1)]
+        else:
+            parts = [p.strip() for p in re.split(r"\s{2,}", stripped, maxsplit=1)]
+
+        if len(parts) < 2:
+            continue
+
+        parsed_date = pd.to_datetime(parts[0], errors="coerce", dayfirst=False)
+        parsed_value = pd.to_numeric(parts[1].replace(",", "."), errors="coerce")
+
+        if pd.isna(parsed_date) or pd.isna(parsed_value):
+            continue
+
+        records.append({"date": parsed_date.normalize(), "value": float(parsed_value)})
+
+    work = pd.DataFrame(records)
+    if work.empty:
+        work = pd.DataFrame(columns=["date", "value"])
 
     target_month = pd.Timestamp(date_value).to_period("M")
-    work = work[work["date"].dt.to_period("M") != target_month]
+    if not work.empty:
+        work = work[work["date"].dt.to_period("M") != target_month]
 
     work = pd.concat(
         [
-            work[["date", "value"]],
+            work,
             pd.DataFrame(
                 [{"date": pd.Timestamp(date_value).normalize(), "value": float(numeric_value)}]
             ),
@@ -406,7 +441,7 @@ def upsert_manual_value(file_path: str, date_value: dt.date, numeric_value: floa
         ignore_index=True,
     ).sort_values("date")
 
-    with open(file_path, "w", encoding="utf-8") as f:
+    with file_path.open("w", encoding="utf-8") as f:
         f.write(f"{date_col}\t{value_col}\n")
         for _, row in work.iterrows():
             f.write(f"{row['date'].strftime('%Y-%m-%d')}\t{row['value']:.1f}\n")
@@ -414,12 +449,13 @@ def upsert_manual_value(file_path: str, date_value: dt.date, numeric_value: floa
 
 def render_manual_entry_form(
     series_name: str,
-    file_path: str,
+    file_path: str | Path,
     series_df: pd.DataFrame,
     source_url: str,
 ) -> None:
     st.subheader(f"{series_name} manuell ergänzen")
     st.markdown(f"Quelle zur Datenergänzung: {source_url}")
+    st.caption(f"Schreibt direkt in: `{Path(file_path).resolve()}`")
     with st.form(f"{series_name.lower()}_manual_entry"):
         new_date = st.date_input(f"Datum ({series_name})", value=dt.date.today())
         new_value = st.number_input(f"Wert ({series_name})", value=50.0, step=0.1, format="%.1f")
@@ -643,13 +679,34 @@ else:
     summary = pd.DataFrame(summary_rows)
 
     st.subheader("Kompakt-Dashboard")
+    selected_row_idx = st.session_state.get("summary_selected_row_idx")
+
+    def highlight_row(row: pd.Series) -> list[str]:
+        if selected_row_idx is not None and row.name == selected_row_idx:
+            return ["background-color: rgba(76, 175, 80, 0.22)"] * len(row)
+        return [""] * len(row)
+
     event = st.dataframe(
-        summary,
+        summary.style.apply(highlight_row, axis=1),
         use_container_width=True,
         hide_index=True,
         on_select="rerun",
-        selection_mode=("single-row", "single-cell"),
+        selection_mode=("single-cell",),
     )
+
+    if event and event.selection and event.selection.cells:
+        first_cell = event.selection.cells[0]
+        if isinstance(first_cell, dict):
+            new_row_idx = first_cell.get("row")
+        elif isinstance(first_cell, (tuple, list)) and first_cell:
+            new_row_idx = first_cell[0]
+        else:
+            new_row_idx = None
+
+        if isinstance(new_row_idx, int) and 0 <= new_row_idx < len(summary):
+            if st.session_state.get("summary_selected_row_idx") != new_row_idx:
+                st.session_state["summary_selected_row_idx"] = new_row_idx
+                st.rerun()
 
     st.caption(f"Quelle Next Release GDP: {BEA_SCHEDULE_URL}")
     st.caption("Quelle FFR & Next Release: https://fred.stlouisfed.org/series/FEDFUNDS")
@@ -658,19 +715,9 @@ else:
     st.caption(f"Quelle ISM Services (NMI) & Next Release: {ISM_SERVICES_URL}")
 
     selected = "GDP"
-    if event and event.selection and event.selection.rows:
-        selected = summary.iloc[event.selection.rows[0]]["Serie"]
-    elif event and event.selection and event.selection.cells:
-        first_cell = event.selection.cells[0]
-        if isinstance(first_cell, dict):
-            row_idx = first_cell.get("row")
-        elif isinstance(first_cell, (tuple, list)) and first_cell:
-            row_idx = first_cell[0]
-        else:
-            row_idx = None
-
-        if isinstance(row_idx, int) and 0 <= row_idx < len(summary):
-            selected = summary.iloc[row_idx]["Serie"]
+    selected_row_idx = st.session_state.get("summary_selected_row_idx")
+    if isinstance(selected_row_idx, int) and 0 <= selected_row_idx < len(summary):
+        selected = summary.iloc[selected_row_idx]["Serie"]
 
     st.divider()
     if selected == "FFR":
