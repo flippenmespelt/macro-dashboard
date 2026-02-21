@@ -301,11 +301,12 @@ def rolling_robust_z(series: pd.Series, window: int):
 
 def rolling_normal_stats(series: pd.Series, window: int) -> pd.DataFrame:
     out = pd.DataFrame(index=series.index)
-    out["mean"] = series.rolling(window=window, min_periods=window).mean()
-    out["std"] = series.rolling(window=window, min_periods=window).std()
+    history = series.shift(1)
+    out["mean"] = history.rolling(window=window, min_periods=window).mean()
+    out["std"] = history.rolling(window=window, min_periods=window).std()
     out["zscore"] = (series - out["mean"]) / out["std"]
-    out["kurtosis"] = series.rolling(window=window, min_periods=window).kurt()
-    out["skewness"] = series.rolling(window=window, min_periods=window).skew()
+    out["kurtosis"] = history.rolling(window=window, min_periods=window).kurt()
+    out["skewness"] = history.rolling(window=window, min_periods=window).skew()
     return out
 
 
@@ -325,13 +326,12 @@ def load_local_index_series(file_path: str) -> pd.DataFrame:
     out = out.dropna(subset=["date", "value"]).sort_values("date")
     out = out.drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
 
-    out["abs_change"] = out["value"].diff()
-    stats = rolling_normal_stats(out["abs_change"], window=20 * 12)
-    out["zscore_20y_abs_change"] = stats["zscore"]
-    out["mean_20y_abs_change"] = stats["mean"]
-    out["std_20y_abs_change"] = stats["std"]
-    out["kurtosis_20y_abs_change"] = stats["kurtosis"]
-    out["skewness_20y_abs_change"] = stats["skewness"]
+    stats = rolling_normal_stats(out["value"], window=20 * 12)
+    out["zscore_20y_level"] = stats["zscore"]
+    out["mean_20y_level"] = stats["mean"]
+    out["std_20y_level"] = stats["std"]
+    out["kurtosis_20y_level"] = stats["kurtosis"]
+    out["skewness_20y_level"] = stats["skewness"]
     return out
 
 
@@ -372,10 +372,10 @@ def build_local_summary_row(
         "Serie": series_name,
         "Letztes Datum": row["date"].date(),
         "Aktuell": safe_float(row["value"]),
-        "Z-Score": safe_float(row.get("zscore_20y_abs_change", float("nan"))),
+        "Z-Score": safe_float(row.get("zscore_20y_level", float("nan"))),
         "Next Release": next_release if next_release else next_release_fallback,
         "Einheit": "Index",
-        "YoY absolut": safe_float(row.get("abs_change", float("nan"))),
+        "YoY absolut": float("nan"),
     }
 
 
@@ -681,18 +681,21 @@ else:
         else:
             st.subheader("ISM Index")
             st.line_chart(ism_obs.set_index("date")["value"])
-            st.subheader("Normaler Z-Score (20 Jahre rollend) auf absolute Veränderung")
-            st.markdown("**Formel:** `Z = (Δ_t - Mittelwert(20y)) / Standardabweichung(20y)`")
-            st.line_chart(ism_obs.set_index("date")["zscore_20y_abs_change"])
+            st.subheader("Normaler Z-Score (20 Jahre) auf absolutes Level ohne Look-Ahead")
+            st.markdown(
+                "**Formel:** `Z_t = (Wert_t - Mittelwert(t-240 bis t-1)) / Standardabweichung(t-240 bis t-1)`"
+            )
+            st.line_chart(ism_obs.set_index("date")["zscore_20y_level"])
             st.dataframe(
                 ism_obs[
                     [
                         "date",
                         "value",
-                        "abs_change",
-                        "zscore_20y_abs_change",
-                        "kurtosis_20y_abs_change",
-                        "skewness_20y_abs_change",
+                        "mean_20y_level",
+                        "std_20y_level",
+                        "zscore_20y_level",
+                        "kurtosis_20y_level",
+                        "skewness_20y_level",
                     ]
                 ],
                 use_container_width=True,
@@ -707,18 +710,21 @@ else:
         else:
             st.subheader("NMI Index")
             st.line_chart(nmi_obs.set_index("date")["value"])
-            st.subheader("Normaler Z-Score (20 Jahre rollend) auf absolute Veränderung")
-            st.markdown("**Formel:** `Z = (Δ_t - Mittelwert(20y)) / Standardabweichung(20y)`")
-            st.line_chart(nmi_obs.set_index("date")["zscore_20y_abs_change"])
+            st.subheader("Normaler Z-Score (20 Jahre) auf absolutes Level ohne Look-Ahead")
+            st.markdown(
+                "**Formel:** `Z_t = (Wert_t - Mittelwert(t-240 bis t-1)) / Standardabweichung(t-240 bis t-1)`"
+            )
+            st.line_chart(nmi_obs.set_index("date")["zscore_20y_level"])
             st.dataframe(
                 nmi_obs[
                     [
                         "date",
                         "value",
-                        "abs_change",
-                        "zscore_20y_abs_change",
-                        "kurtosis_20y_abs_change",
-                        "skewness_20y_abs_change",
+                        "mean_20y_level",
+                        "std_20y_level",
+                        "zscore_20y_level",
+                        "kurtosis_20y_level",
+                        "skewness_20y_level",
                     ]
                 ],
                 use_container_width=True,
