@@ -2,6 +2,7 @@ import bisect
 import io
 import re
 import datetime as dt
+from pathlib import Path
 
 import pandas as pd
 import requests
@@ -11,8 +12,9 @@ from bs4 import BeautifulSoup
 EXCEL_URL = "https://www.philadelphiafed.org/-/media/FRBP/Assets/Surveys-And-Data/real-time-data/data-files/xlsx/ROUTPUTQvQd.xlsx?sc_lang=en&hash=34FA1C6BF0007996E1885C8C32E3BEF9"
 BEA_SCHEDULE_URL = "https://www.bea.gov/news/schedule"
 FRED_SERIES_OBS_URL = "https://api.stlouisfed.org/fred/series/observations"
-ISM_FILE_PATH = "ism.txt"
-NMI_FILE_PATH = "nmi.txt"
+BASE_DIR = Path(__file__).resolve().parent
+ISM_FILE_PATH = BASE_DIR / "ism.txt"
+NMI_FILE_PATH = BASE_DIR / "nmi.txt"
 ISM_PMI_URL = "https://www.ismworld.org/supply-management-news-and-reports/reports/ism-report-on-business/pmi/"
 ISM_SERVICES_URL = "https://www.ismworld.org/supply-management-news-and-reports/reports/ism-report-on-business/services/"
 
@@ -311,7 +313,7 @@ def rolling_normal_stats(series: pd.Series, window: int) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=15 * 60, show_spinner=False)
-def load_local_index_series(file_path: str) -> pd.DataFrame:
+def load_local_index_series(file_path: str | Path) -> pd.DataFrame:
     raw = pd.read_csv(file_path, sep=r"\t+|\s{2,}", engine="python", dtype=str)
     if raw.shape[1] < 2:
         raise RuntimeError(f"Datei {file_path} enthält nicht genug Spalten.")
@@ -339,7 +341,9 @@ def safe_float(value) -> float:
     return float(value) if pd.notna(value) else float("nan")
 
 
-def load_local_index_bundle(file_path: str) -> tuple[pd.DataFrame, pd.DataFrame, str | None, Exception | None]:
+def load_local_index_bundle(
+    file_path: str | Path,
+) -> tuple[pd.DataFrame, pd.DataFrame, str | None, Exception | None]:
     try:
         obs = load_local_index_series(file_path)
         latest = obs.dropna(subset=["value"]).tail(1)
@@ -379,7 +383,7 @@ def build_local_summary_row(
     }
 
 
-def upsert_manual_value(file_path: str, date_value: dt.date, numeric_value: float) -> None:
+def upsert_manual_value(file_path: str | Path, date_value: dt.date, numeric_value: float) -> None:
     raw = pd.read_csv(file_path, sep=r"\t+|\s{2,}", engine="python", dtype=str)
     if raw.shape[1] < 2:
         raise RuntimeError(f"Datei {file_path} enthält nicht genug Spalten.")
@@ -414,12 +418,13 @@ def upsert_manual_value(file_path: str, date_value: dt.date, numeric_value: floa
 
 def render_manual_entry_form(
     series_name: str,
-    file_path: str,
+    file_path: str | Path,
     series_df: pd.DataFrame,
     source_url: str,
 ) -> None:
     st.subheader(f"{series_name} manuell ergänzen")
     st.markdown(f"Quelle zur Datenergänzung: {source_url}")
+    st.caption(f"Schreibt direkt in: `{Path(file_path).resolve()}`")
     with st.form(f"{series_name.lower()}_manual_entry"):
         new_date = st.date_input(f"Datum ({series_name})", value=dt.date.today())
         new_value = st.number_input(f"Wert ({series_name})", value=50.0, step=0.1, format="%.1f")
@@ -643,12 +648,19 @@ else:
     summary = pd.DataFrame(summary_rows)
 
     st.subheader("Kompakt-Dashboard")
+    selected_row_idx = st.session_state.get("summary_selected_row_idx")
+
+    def highlight_row(row: pd.Series) -> list[str]:
+        if selected_row_idx is not None and row.name == selected_row_idx:
+            return ["background-color: rgba(76, 175, 80, 0.22)"] * len(row)
+        return [""] * len(row)
+
     event = st.dataframe(
-        summary,
+        summary.style.apply(highlight_row, axis=1),
         use_container_width=True,
         hide_index=True,
         on_select="rerun",
-        selection_mode=("single-row", "single-cell"),
+        selection_mode=("single-cell",),
     )
 
     st.caption(f"Quelle Next Release GDP: {BEA_SCHEDULE_URL}")
@@ -658,9 +670,7 @@ else:
     st.caption(f"Quelle ISM Services (NMI) & Next Release: {ISM_SERVICES_URL}")
 
     selected = "GDP"
-    if event and event.selection and event.selection.rows:
-        selected = summary.iloc[event.selection.rows[0]]["Serie"]
-    elif event and event.selection and event.selection.cells:
+    if event and event.selection and event.selection.cells:
         first_cell = event.selection.cells[0]
         if isinstance(first_cell, dict):
             row_idx = first_cell.get("row")
@@ -670,6 +680,7 @@ else:
             row_idx = None
 
         if isinstance(row_idx, int) and 0 <= row_idx < len(summary):
+            st.session_state["summary_selected_row_idx"] = row_idx
             selected = summary.iloc[row_idx]["Serie"]
 
     st.divider()
