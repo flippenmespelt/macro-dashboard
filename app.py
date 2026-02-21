@@ -11,8 +11,8 @@ from bs4 import BeautifulSoup
 EXCEL_URL = "https://www.philadelphiafed.org/-/media/FRBP/Assets/Surveys-And-Data/real-time-data/data-files/xlsx/ROUTPUTQvQd.xlsx?sc_lang=en&hash=34FA1C6BF0007996E1885C8C32E3BEF9"
 BEA_SCHEDULE_URL = "https://www.bea.gov/news/schedule"
 FRED_SERIES_OBS_URL = "https://api.stlouisfed.org/fred/series/observations"
-ISM_FILE_PATH = "ism"
-NMI_FILE_PATH = "nmi"
+ISM_FILE_PATH = "ism.txt"
+NMI_FILE_PATH = "nmi.txt"
 ISM_PMI_URL = "https://www.ismworld.org/supply-management-news-and-reports/reports/ism-report-on-business/pmi/"
 ISM_SERVICES_URL = "https://www.ismworld.org/supply-management-news-and-reports/reports/ism-report-on-business/services/"
 
