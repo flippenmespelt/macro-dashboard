@@ -279,9 +279,9 @@ def rolling_robust_z(series: pd.Series, window: int):
     denom_s = pd.Series(index=series.index, dtype="float64")
 
     for i in range(len(series)):
-        if i + 1 < window:
+        if i < window:
             continue
-        w = series.iloc[i + 1 - window : i + 1].dropna()
+        w = series.iloc[i - window : i].dropna()
         if len(w) < window:
             continue
 
@@ -624,7 +624,7 @@ else:
         use_container_width=True,
         hide_index=True,
         on_select="rerun",
-        selection_mode="single-row",
+        selection_mode="multi-row",
     )
 
     st.caption(f"Quelle Next Release GDP: {BEA_SCHEDULE_URL}")
@@ -635,7 +635,7 @@ else:
 
     selected = "GDP"
     if event and event.selection and event.selection.rows:
-        selected = summary.iloc[event.selection.rows[0]]["Serie"]
+        selected = summary.iloc[event.selection.rows[-1]]["Serie"]
 
     st.divider()
     if selected == "FFR":
@@ -664,7 +664,7 @@ else:
 
             st.subheader("Robuster Z-Score (20 Jahre) auf YoY (%)")
             st.markdown(
-                "**Formel:** `Robust Z = (YoY_t - Median(20y-Fenster)) / (1.4826 * MAD(20y-Fenster))`"
+                "**Formel:** `Robust Z_t = (YoY_t - Median(t-240 bis t-1)) / (1.4826 * MAD(t-240 bis t-1))`"
             )
             st.line_chart(m2_obs.set_index("date")["robust_z_20y_yoy"])
 
@@ -738,7 +738,7 @@ else:
 
         st.subheader("RGDP QoQ SAAR Robuster Z-Score 20y")
         st.markdown(
-            "**Formel:** `Robust Z = (delta_t - Median(20y-Fenster)) / (1.4826 * MAD(20y-Fenster))`"
+            "**Formel:** `Robust Z_t = (delta_t - Median(t-240 bis t-1)) / (1.4826 * MAD(t-240 bis t-1))`"
         )
         st.line_chart(calc.set_index("Date")["robust_z_20y_delta"])
 
