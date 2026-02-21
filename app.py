@@ -382,10 +382,16 @@ def build_local_summary_row(
 def missing_months(series_df: pd.DataFrame) -> pd.DatetimeIndex:
     if series_df.empty:
         return pd.DatetimeIndex([])
-    start = series_df["date"].min().to_period("M").to_timestamp("MS")
-    end = series_df["date"].max().to_period("M").to_timestamp("MS")
+
+    month_start = pd.to_datetime(series_df["date"], errors="coerce").dt.to_period("M").dt.to_timestamp()
+    month_start = month_start.dropna()
+    if month_start.empty:
+        return pd.DatetimeIndex([])
+
+    start = month_start.min()
+    end = month_start.max()
     expected = pd.date_range(start=start, end=end, freq="MS")
-    actual = pd.DatetimeIndex(series_df["date"].dt.to_period("M").dt.to_timestamp("MS").unique())
+    actual = pd.DatetimeIndex(month_start.unique())
     return expected.difference(actual)
 
 
