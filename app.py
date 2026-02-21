@@ -311,7 +311,7 @@ def rolling_normal_stats(series: pd.Series, window: int) -> pd.DataFrame:
 
 @st.cache_data(ttl=15 * 60, show_spinner=False)
 def load_local_index_series(file_path: str) -> pd.DataFrame:
-    raw = pd.read_csv(file_path, sep=r"\t+", engine="python", dtype=str)
+    raw = pd.read_csv(file_path, sep=r"\t+|\s{2,}", engine="python", dtype=str)
     if raw.shape[1] < 2:
         raise RuntimeError(f"Datei {file_path} enthält nicht genug Spalten.")
 
@@ -333,6 +333,49 @@ def load_local_index_series(file_path: str) -> pd.DataFrame:
     out["kurtosis_20y_abs_change"] = stats["kurtosis"]
     out["skewness_20y_abs_change"] = stats["skewness"]
     return out
+
+
+def safe_float(value) -> float:
+    return float(value) if pd.notna(value) else float("nan")
+
+
+def load_local_index_bundle(file_path: str, release_url: str) -> tuple[pd.DataFrame, pd.DataFrame, str | None, Exception | None]:
+    try:
+        obs = load_local_index_series(file_path)
+        latest = obs.dropna(subset=["value"]).tail(1)
+        next_release = fetch_ism_next_release_date(release_url)
+        return obs, latest, next_release, None
+    except Exception as exc:
+        return pd.DataFrame(columns=["date", "value"]), pd.DataFrame(), None, exc
+
+
+def build_local_summary_row(
+    series_name: str,
+    latest: pd.DataFrame,
+    next_release: str | None,
+    next_release_fallback: str,
+) -> dict:
+    if latest.empty:
+        return {
+            "Serie": series_name,
+            "Letztes Datum": pd.NaT,
+            "Aktuell": float("nan"),
+            "Z-Score": float("nan"),
+            "Next Release": next_release if next_release else next_release_fallback,
+            "Einheit": "Index",
+            "YoY absolut": float("nan"),
+        }
+
+    row = latest.iloc[0]
+    return {
+        "Serie": series_name,
+        "Letztes Datum": row["date"].date(),
+        "Aktuell": safe_float(row["value"]),
+        "Z-Score": safe_float(row.get("zscore_20y_abs_change", float("nan"))),
+        "Next Release": next_release if next_release else next_release_fallback,
+        "Einheit": "Index",
+        "YoY absolut": safe_float(row.get("abs_change", float("nan"))),
+    }
 
 
 def missing_months(series_df: pd.DataFrame) -> pd.DatetimeIndex:
@@ -524,27 +567,12 @@ else:
         m2_next_release = None
         m2_error = exc
 
-    try:
-        ism_obs = load_local_index_series(ISM_FILE_PATH)
-        ism_latest = ism_obs.dropna(subset=["value"]).tail(1)
-        ism_next_release = fetch_ism_next_release_date(ISM_PMI_URL)
-        ism_error = None
-    except Exception as exc:
-        ism_obs = pd.DataFrame(columns=["date", "value"])
-        ism_latest = pd.DataFrame()
-        ism_next_release = None
-        ism_error = exc
-
-    try:
-        nmi_obs = load_local_index_series(NMI_FILE_PATH)
-        nmi_latest = nmi_obs.dropna(subset=["value"]).tail(1)
-        nmi_next_release = fetch_ism_next_release_date(ISM_SERVICES_URL)
-        nmi_error = None
-    except Exception as exc:
-        nmi_obs = pd.DataFrame(columns=["date", "value"])
-        nmi_latest = pd.DataFrame()
-        nmi_next_release = None
-        nmi_error = exc
+    ism_obs, ism_latest, ism_next_release, ism_error = load_local_index_bundle(
+        ISM_FILE_PATH, ISM_PMI_URL
+    )
+    nmi_obs, nmi_latest, nmi_next_release, nmi_error = load_local_index_bundle(
+        NMI_FILE_PATH, ISM_SERVICES_URL
+    )
 
     summary_rows = [
         {
@@ -596,47 +624,12 @@ else:
             }
         )
 
-    if not ism_latest.empty:
-        summary_rows.append(
-            {
-                "Serie": "ISM",
-                "Letztes Datum": ism_latest["date"].iloc[0].date(),
-                "Aktuell": float(ism_latest["value"].iloc[0]),
-                "Z-Score": (
-                    float(ism_latest["zscore_20y_abs_change"].iloc[0])
-                    if pd.notna(ism_latest["zscore_20y_abs_change"].iloc[0])
-                    else float("nan")
-                ),
-                "Next Release": ism_next_release if ism_next_release else "siehe ISM PMI Seite",
-                "Einheit": "Index",
-                "YoY absolut": (
-                    float(ism_latest["abs_change"].iloc[0])
-                    if pd.notna(ism_latest["abs_change"].iloc[0])
-                    else float("nan")
-                ),
-            }
-        )
-
-    if not nmi_latest.empty:
-        summary_rows.append(
-            {
-                "Serie": "NMI",
-                "Letztes Datum": nmi_latest["date"].iloc[0].date(),
-                "Aktuell": float(nmi_latest["value"].iloc[0]),
-                "Z-Score": (
-                    float(nmi_latest["zscore_20y_abs_change"].iloc[0])
-                    if pd.notna(nmi_latest["zscore_20y_abs_change"].iloc[0])
-                    else float("nan")
-                ),
-                "Next Release": nmi_next_release if nmi_next_release else "siehe ISM Services Seite",
-                "Einheit": "Index",
-                "YoY absolut": (
-                    float(nmi_latest["abs_change"].iloc[0])
-                    if pd.notna(nmi_latest["abs_change"].iloc[0])
-                    else float("nan")
-                ),
-            }
-        )
+    summary_rows.append(
+        build_local_summary_row("ISM", ism_latest, ism_next_release, "siehe ISM PMI Seite")
+    )
+    summary_rows.append(
+        build_local_summary_row("NMI", nmi_latest, nmi_next_release, "siehe ISM Services Seite")
+    )
 
     summary = pd.DataFrame(summary_rows)
 
