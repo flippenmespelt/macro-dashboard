@@ -386,8 +386,14 @@ def append_manual_value(file_path: str, date_value: dt.date, numeric_value: floa
         f.write(line)
 
 
-def render_manual_entry_form(series_name: str, file_path: str, series_df: pd.DataFrame) -> None:
+def render_manual_entry_form(
+    series_name: str,
+    file_path: str,
+    series_df: pd.DataFrame,
+    source_url: str,
+) -> None:
     st.subheader(f"{series_name} manuell ergänzen")
+    st.markdown(f"Quelle zur Datenergänzung: {source_url}")
     with st.form(f"{series_name.lower()}_manual_entry"):
         new_date = st.date_input(f"Datum ({series_name})", value=dt.date.today())
         new_value = st.number_input(f"Wert ({series_name})", value=50.0, step=0.1, format="%.1f")
@@ -624,7 +630,7 @@ else:
         use_container_width=True,
         hide_index=True,
         on_select="rerun",
-        selection_mode="multi-row",
+        selection_mode="single-row",
     )
 
     st.caption(f"Quelle Next Release GDP: {BEA_SCHEDULE_URL}")
@@ -635,7 +641,7 @@ else:
 
     selected = "GDP"
     if event and event.selection and event.selection.rows:
-        selected = summary.iloc[event.selection.rows[-1]]["Serie"]
+        selected = summary.iloc[event.selection.rows[0]]["Serie"]
 
     st.divider()
     if selected == "FFR":
@@ -700,7 +706,12 @@ else:
                 ],
                 use_container_width=True,
             )
-        render_manual_entry_form("ISM", ISM_FILE_PATH, ism_obs)
+        render_manual_entry_form(
+            "ISM",
+            ISM_FILE_PATH,
+            ism_obs,
+            "https://www.forexfactory.com/calendar/252-us-ism-manufacturing-pmi",
+        )
     elif selected == "NMI":
         st.header("NMI Details")
         if nmi_error:
@@ -729,7 +740,12 @@ else:
                 ],
                 use_container_width=True,
             )
-        render_manual_entry_form("NMI", NMI_FILE_PATH, nmi_obs)
+        render_manual_entry_form(
+            "NMI",
+            NMI_FILE_PATH,
+            nmi_obs,
+            "https://www.forexfactory.com/calendar/253-us-ism-services-pmi",
+        )
     else:
         st.header("GDP Details")
         st.subheader("RGDP QoQ SAAR")
