@@ -339,12 +339,13 @@ def safe_float(value) -> float:
     return float(value) if pd.notna(value) else float("nan")
 
 
-def load_local_index_bundle(file_path: str, release_url: str) -> tuple[pd.DataFrame, pd.DataFrame, str | None, Exception | None]:
+def load_local_index_bundle(file_path: str) -> tuple[pd.DataFrame, pd.DataFrame, str | None, Exception | None]:
     try:
         obs = load_local_index_series(file_path)
         latest = obs.dropna(subset=["value"]).tail(1)
-        next_release = fetch_ism_next_release_date(release_url)
-        return obs, latest, next_release, None
+        # Die Werte sollen ausschließlich aus den lokalen Textdateien stammen.
+        # Deshalb wird kein externer Request für Veröffentlichungsdaten gemacht.
+        return obs, latest, None, None
     except Exception as exc:
         return pd.DataFrame(columns=["date", "value"]), pd.DataFrame(), None, exc
 
@@ -393,29 +394,6 @@ def append_manual_value(file_path: str, date_value: dt.date, numeric_value: floa
     line = f"{date_str}\t{numeric_value:.1f}\n"
     with open(file_path, "a", encoding="utf-8") as f:
         f.write(line)
-
-
-@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
-def fetch_ism_next_release_date(url: str) -> str | None:
-    response = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
-    response.raise_for_status()
-
-    soup = BeautifulSoup(response.text, "html.parser")
-    text = " ".join(soup.get_text(" ").split())
-
-    sentence_candidates = re.findall(r"[^.]*next[^.]*release[^.]*\.", text, flags=re.IGNORECASE)
-    date_pattern = r"([A-Za-z]+day,\s+[A-Za-z]+\s+\d{1,2},\s+\d{4}|[A-Za-z]+\s+\d{1,2},\s+\d{4})"
-
-    for sentence in sentence_candidates:
-        match = re.search(date_pattern, sentence)
-        if match:
-            return match.group(1)
-
-    fallback = re.search(r"Next\s+Release[^A-Za-z0-9]*" + date_pattern, text, flags=re.IGNORECASE)
-    if fallback:
-        return fallback.group(1)
-
-    return None
 
 
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
@@ -567,12 +545,8 @@ else:
         m2_next_release = None
         m2_error = exc
 
-    ism_obs, ism_latest, ism_next_release, ism_error = load_local_index_bundle(
-        ISM_FILE_PATH, ISM_PMI_URL
-    )
-    nmi_obs, nmi_latest, nmi_next_release, nmi_error = load_local_index_bundle(
-        NMI_FILE_PATH, ISM_SERVICES_URL
-    )
+    ism_obs, ism_latest, ism_next_release, ism_error = load_local_index_bundle(ISM_FILE_PATH)
+    nmi_obs, nmi_latest, nmi_next_release, nmi_error = load_local_index_bundle(NMI_FILE_PATH)
 
     summary_rows = [
         {
