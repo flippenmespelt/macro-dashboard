@@ -11,6 +11,10 @@ from bs4 import BeautifulSoup
 EXCEL_URL = "https://www.philadelphiafed.org/-/media/FRBP/Assets/Surveys-And-Data/real-time-data/data-files/xlsx/ROUTPUTQvQd.xlsx?sc_lang=en&hash=34FA1C6BF0007996E1885C8C32E3BEF9"
 BEA_SCHEDULE_URL = "https://www.bea.gov/news/schedule"
 FRED_SERIES_OBS_URL = "https://api.stlouisfed.org/fred/series/observations"
+ISM_FILE_PATH = "ism"
+NMI_FILE_PATH = "nmi"
+ISM_PMI_URL = "https://www.ismworld.org/supply-management-news-and-reports/reports/ism-report-on-business/pmi/"
+ISM_SERVICES_URL = "https://www.ismworld.org/supply-management-news-and-reports/reports/ism-report-on-business/services/"
 
 st.set_page_config(page_title="Macro Dashboard", layout="wide")
 
@@ -295,6 +299,82 @@ def rolling_robust_z(series: pd.Series, window: int):
     return z, med_s, mad_s, denom_s
 
 
+def rolling_normal_stats(series: pd.Series, window: int) -> pd.DataFrame:
+    out = pd.DataFrame(index=series.index)
+    out["mean"] = series.rolling(window=window, min_periods=window).mean()
+    out["std"] = series.rolling(window=window, min_periods=window).std()
+    out["zscore"] = (series - out["mean"]) / out["std"]
+    out["kurtosis"] = series.rolling(window=window, min_periods=window).kurt()
+    out["skewness"] = series.rolling(window=window, min_periods=window).skew()
+    return out
+
+
+@st.cache_data(ttl=15 * 60, show_spinner=False)
+def load_local_index_series(file_path: str) -> pd.DataFrame:
+    raw = pd.read_csv(file_path, sep=r"\t+", engine="python", dtype=str)
+    if raw.shape[1] < 2:
+        raise RuntimeError(f"Datei {file_path} enthält nicht genug Spalten.")
+
+    raw = raw.iloc[:, :2].copy()
+    raw.columns = ["date_raw", "value_raw"]
+
+    out = pd.DataFrame()
+    out["date"] = pd.to_datetime(raw["date_raw"], errors="coerce", dayfirst=False)
+    value_str = raw["value_raw"].astype(str).str.strip().str.replace(",", ".", regex=False)
+    out["value"] = pd.to_numeric(value_str, errors="coerce")
+    out = out.dropna(subset=["date", "value"]).sort_values("date")
+    out = out.drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
+
+    out["abs_change"] = out["value"].diff()
+    stats = rolling_normal_stats(out["abs_change"], window=20 * 12)
+    out["zscore_20y_abs_change"] = stats["zscore"]
+    out["mean_20y_abs_change"] = stats["mean"]
+    out["std_20y_abs_change"] = stats["std"]
+    out["kurtosis_20y_abs_change"] = stats["kurtosis"]
+    out["skewness_20y_abs_change"] = stats["skewness"]
+    return out
+
+
+def missing_months(series_df: pd.DataFrame) -> pd.DatetimeIndex:
+    if series_df.empty:
+        return pd.DatetimeIndex([])
+    start = series_df["date"].min().to_period("M").to_timestamp("MS")
+    end = series_df["date"].max().to_period("M").to_timestamp("MS")
+    expected = pd.date_range(start=start, end=end, freq="MS")
+    actual = pd.DatetimeIndex(series_df["date"].dt.to_period("M").dt.to_timestamp("MS").unique())
+    return expected.difference(actual)
+
+
+def append_manual_value(file_path: str, date_value: dt.date, numeric_value: float) -> None:
+    date_str = pd.Timestamp(date_value).strftime("%Y-%m-%d")
+    line = f"{date_str}\t{numeric_value:.1f}\n"
+    with open(file_path, "a", encoding="utf-8") as f:
+        f.write(line)
+
+
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+def fetch_ism_next_release_date(url: str) -> str | None:
+    response = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+    response.raise_for_status()
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    text = " ".join(soup.get_text(" ").split())
+
+    sentence_candidates = re.findall(r"[^.]*next[^.]*release[^.]*\.", text, flags=re.IGNORECASE)
+    date_pattern = r"([A-Za-z]+day,\s+[A-Za-z]+\s+\d{1,2},\s+\d{4}|[A-Za-z]+\s+\d{1,2},\s+\d{4})"
+
+    for sentence in sentence_candidates:
+        match = re.search(date_pattern, sentence)
+        if match:
+            return match.group(1)
+
+    fallback = re.search(r"Next\s+Release[^A-Za-z0-9]*" + date_pattern, text, flags=re.IGNORECASE)
+    if fallback:
+        return fallback.group(1)
+
+    return None
+
+
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
 def fetch_next_bea_gdp_advance_estimate() -> str | None:
     response = requests.get(BEA_SCHEDULE_URL, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
@@ -444,6 +524,28 @@ else:
         m2_next_release = None
         m2_error = exc
 
+    try:
+        ism_obs = load_local_index_series(ISM_FILE_PATH)
+        ism_latest = ism_obs.dropna(subset=["value"]).tail(1)
+        ism_next_release = fetch_ism_next_release_date(ISM_PMI_URL)
+        ism_error = None
+    except Exception as exc:
+        ism_obs = pd.DataFrame(columns=["date", "value"])
+        ism_latest = pd.DataFrame()
+        ism_next_release = None
+        ism_error = exc
+
+    try:
+        nmi_obs = load_local_index_series(NMI_FILE_PATH)
+        nmi_latest = nmi_obs.dropna(subset=["value"]).tail(1)
+        nmi_next_release = fetch_ism_next_release_date(ISM_SERVICES_URL)
+        nmi_error = None
+    except Exception as exc:
+        nmi_obs = pd.DataFrame(columns=["date", "value"])
+        nmi_latest = pd.DataFrame()
+        nmi_next_release = None
+        nmi_error = exc
+
     summary_rows = [
         {
             "Serie": "GDP",
@@ -494,6 +596,48 @@ else:
             }
         )
 
+    if not ism_latest.empty:
+        summary_rows.append(
+            {
+                "Serie": "ISM",
+                "Letztes Datum": ism_latest["date"].iloc[0].date(),
+                "Aktuell": float(ism_latest["value"].iloc[0]),
+                "Z-Score": (
+                    float(ism_latest["zscore_20y_abs_change"].iloc[0])
+                    if pd.notna(ism_latest["zscore_20y_abs_change"].iloc[0])
+                    else float("nan")
+                ),
+                "Next Release": ism_next_release if ism_next_release else "siehe ISM PMI Seite",
+                "Einheit": "Index",
+                "YoY absolut": (
+                    float(ism_latest["abs_change"].iloc[0])
+                    if pd.notna(ism_latest["abs_change"].iloc[0])
+                    else float("nan")
+                ),
+            }
+        )
+
+    if not nmi_latest.empty:
+        summary_rows.append(
+            {
+                "Serie": "NMI",
+                "Letztes Datum": nmi_latest["date"].iloc[0].date(),
+                "Aktuell": float(nmi_latest["value"].iloc[0]),
+                "Z-Score": (
+                    float(nmi_latest["zscore_20y_abs_change"].iloc[0])
+                    if pd.notna(nmi_latest["zscore_20y_abs_change"].iloc[0])
+                    else float("nan")
+                ),
+                "Next Release": nmi_next_release if nmi_next_release else "siehe ISM Services Seite",
+                "Einheit": "Index",
+                "YoY absolut": (
+                    float(nmi_latest["abs_change"].iloc[0])
+                    if pd.notna(nmi_latest["abs_change"].iloc[0])
+                    else float("nan")
+                ),
+            }
+        )
+
     summary = pd.DataFrame(summary_rows)
 
     st.subheader("Kompakt-Dashboard")
@@ -508,6 +652,8 @@ else:
     st.caption(f"Quelle Next Release GDP: {BEA_SCHEDULE_URL}")
     st.caption("Quelle FFR & Next Release: https://fred.stlouisfed.org/series/FEDFUNDS")
     st.caption("Quelle M2 & Next Release: https://fred.stlouisfed.org/series/M2SL")
+    st.caption(f"Quelle ISM PMI & Next Release: {ISM_PMI_URL}")
+    st.caption(f"Quelle ISM Services (NMI) & Next Release: {ISM_SERVICES_URL}")
 
     selected = "GDP"
     if event and event.selection and event.selection.rows:
@@ -548,6 +694,112 @@ else:
                 m2_obs[["date", "value", "yoy_pct", "robust_z_20y_yoy"]],
                 use_container_width=True,
             )
+    elif selected == "ISM":
+        st.header("ISM Details")
+        if ism_error:
+            st.warning(f"ISM konnte nicht geladen werden: {ism_error}")
+        elif ism_obs.empty:
+            st.warning("ISM-Zeitreihe enthält keine Werte.")
+        else:
+            missing_ism = missing_months(ism_obs)
+            if len(missing_ism) > 0:
+                st.warning(
+                    f"Plausibilitätsprüfung: Es fehlen {len(missing_ism)} Monatswerte. "
+                    f"Erster fehlender Monat: {missing_ism[0].date()}"
+                )
+            else:
+                st.success("Plausibilitätsprüfung: Für jeden Monat liegt ein ISM-Wert vor.")
+
+            st.subheader("ISM Index")
+            st.line_chart(ism_obs.set_index("date")["value"])
+            st.subheader("Absolute Veränderung (Monat zu Monat)")
+            st.line_chart(ism_obs.set_index("date")["abs_change"])
+            st.subheader("Normaler Z-Score (20 Jahre rollend) auf absolute Veränderung")
+            st.markdown("**Formel:** `Z = (Δ_t - Mittelwert(20y)) / Standardabweichung(20y)`")
+            st.line_chart(ism_obs.set_index("date")["zscore_20y_abs_change"])
+            st.dataframe(
+                ism_obs[
+                    [
+                        "date",
+                        "value",
+                        "abs_change",
+                        "zscore_20y_abs_change",
+                        "kurtosis_20y_abs_change",
+                        "skewness_20y_abs_change",
+                    ]
+                ],
+                use_container_width=True,
+            )
+
+            st.subheader("ISM manuell ergänzen")
+            with st.form("ism_manual_entry"):
+                ism_new_date = st.date_input("Datum (ISM)", value=dt.date.today())
+                ism_new_value = st.number_input("Wert (ISM)", value=50.0, step=0.1, format="%.1f")
+                ism_submit = st.form_submit_button("ISM-Wert speichern")
+                if ism_submit:
+                    month_exists = (
+                        ism_obs["date"].dt.to_period("M")
+                        == pd.Timestamp(ism_new_date).to_period("M")
+                    ).any()
+                    if month_exists:
+                        st.error("Für diesen Monat ist bereits ein ISM-Wert vorhanden.")
+                    else:
+                        append_manual_value(ISM_FILE_PATH, ism_new_date, ism_new_value)
+                        st.cache_data.clear()
+                        st.rerun()
+    elif selected == "NMI":
+        st.header("NMI Details")
+        if nmi_error:
+            st.warning(f"NMI konnte nicht geladen werden: {nmi_error}")
+        elif nmi_obs.empty:
+            st.warning("NMI-Zeitreihe enthält keine Werte.")
+        else:
+            missing_nmi = missing_months(nmi_obs)
+            if len(missing_nmi) > 0:
+                st.warning(
+                    f"Plausibilitätsprüfung: Es fehlen {len(missing_nmi)} Monatswerte. "
+                    f"Erster fehlender Monat: {missing_nmi[0].date()}"
+                )
+            else:
+                st.success("Plausibilitätsprüfung: Für jeden Monat liegt ein NMI-Wert vor.")
+
+            st.subheader("NMI Index")
+            st.line_chart(nmi_obs.set_index("date")["value"])
+            st.subheader("Absolute Veränderung (Monat zu Monat)")
+            st.line_chart(nmi_obs.set_index("date")["abs_change"])
+            st.subheader("Normaler Z-Score (20 Jahre rollend) auf absolute Veränderung")
+            st.markdown("**Formel:** `Z = (Δ_t - Mittelwert(20y)) / Standardabweichung(20y)`")
+            st.line_chart(nmi_obs.set_index("date")["zscore_20y_abs_change"])
+            st.dataframe(
+                nmi_obs[
+                    [
+                        "date",
+                        "value",
+                        "abs_change",
+                        "zscore_20y_abs_change",
+                        "kurtosis_20y_abs_change",
+                        "skewness_20y_abs_change",
+                    ]
+                ],
+                use_container_width=True,
+            )
+
+            st.subheader("NMI manuell ergänzen")
+            with st.form("nmi_manual_entry"):
+                nmi_new_date = st.date_input("Datum (NMI)", value=dt.date.today())
+                nmi_new_value = st.number_input("Wert (NMI)", value=50.0, step=0.1, format="%.1f")
+                nmi_submit = st.form_submit_button("NMI-Wert speichern")
+                if nmi_submit:
+                    month_exists = (
+                        nmi_obs["date"].dt.to_period("M")
+                        == pd.Timestamp(nmi_new_date).to_period("M")
+                    ).any()
+                    if month_exists:
+                        st.error("Für diesen Monat ist bereits ein NMI-Wert vorhanden.")
+                    else:
+                        append_manual_value(NMI_FILE_PATH, nmi_new_date, nmi_new_value)
+                        st.cache_data.clear()
+                        st.rerun()
     else:
         st.header("GDP Details")
         st.subheader("RGDP QoQ SAAR")
