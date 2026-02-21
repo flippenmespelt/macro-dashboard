@@ -384,42 +384,9 @@ def build_local_summary_row(
 
 
 def upsert_manual_value(file_path: str | Path, date_value: dt.date, numeric_value: float) -> None:
-    file_path = Path(file_path)
-    if not file_path.exists():
-        raise RuntimeError(f"Datei {file_path} wurde nicht gefunden.")
-
-    lines = file_path.read_text(encoding="utf-8").splitlines()
-    if not lines:
-        raise RuntimeError(f"Datei {file_path} ist leer.")
-
-    header = lines[0].strip()
-    if "	" in header:
-        date_col, value_col = [c.strip() for c in header.split("	", 1)]
-    else:
-        parts = re.split(r"\s{2,}", header)
-        if len(parts) < 2:
-            raise RuntimeError(f"Datei {file_path} enthält nicht genug Spalten.")
-        date_col, value_col = parts[0].strip(), parts[1].strip()
-
-    records: list[dict[str, object]] = []
-    for line in lines[1:]:
-        stripped = line.strip()
-        if not stripped:
-            continue
-
-        if "	" in stripped:
-            parts = [p.strip() for p in stripped.split("	", 1)]
-        else:
-            parts = [p.strip() for p in re.split(r"\s{2,}", stripped, maxsplit=1)]
-
-        if len(parts) < 2:
-            continue
-
-        parsed_date = pd.to_datetime(parts[0], errors="coerce", dayfirst=False)
-        parsed_value = pd.to_numeric(parts[1].replace(",", "."), errors="coerce")
-
-        if pd.isna(parsed_date) or pd.isna(parsed_value):
-            continue
+    raw = pd.read_csv(file_path, sep=r"\t+|\s{2,}", engine="python", dtype=str)
+    if raw.shape[1] < 2:
+        raise RuntimeError(f"Datei {file_path} enthält nicht genug Spalten.")
 
         records.append({"date": parsed_date.normalize(), "value": float(parsed_value)})
 
@@ -715,9 +682,18 @@ else:
     st.caption(f"Quelle ISM Services (NMI) & Next Release: {ISM_SERVICES_URL}")
 
     selected = "GDP"
-    selected_row_idx = st.session_state.get("summary_selected_row_idx")
-    if isinstance(selected_row_idx, int) and 0 <= selected_row_idx < len(summary):
-        selected = summary.iloc[selected_row_idx]["Serie"]
+    if event and event.selection and event.selection.cells:
+        first_cell = event.selection.cells[0]
+        if isinstance(first_cell, dict):
+            row_idx = first_cell.get("row")
+        elif isinstance(first_cell, (tuple, list)) and first_cell:
+            row_idx = first_cell[0]
+        else:
+            row_idx = None
+
+        if isinstance(row_idx, int) and 0 <= row_idx < len(summary):
+            st.session_state["summary_selected_row_idx"] = row_idx
+            selected = summary.iloc[row_idx]["Serie"]
 
     st.divider()
     if selected == "FFR":
