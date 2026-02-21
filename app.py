@@ -527,30 +527,24 @@ else:
     try:
         ism_obs = load_local_index_series(ISM_FILE_PATH)
         ism_latest = ism_obs.dropna(subset=["value"]).tail(1)
+        ism_next_release = fetch_ism_next_release_date(ISM_PMI_URL)
         ism_error = None
     except Exception as exc:
         ism_obs = pd.DataFrame(columns=["date", "value"])
         ism_latest = pd.DataFrame()
-        ism_error = exc
-
-    try:
-        ism_next_release = fetch_ism_next_release_date(ISM_PMI_URL)
-    except Exception:
         ism_next_release = None
+        ism_error = exc
 
     try:
         nmi_obs = load_local_index_series(NMI_FILE_PATH)
         nmi_latest = nmi_obs.dropna(subset=["value"]).tail(1)
+        nmi_next_release = fetch_ism_next_release_date(ISM_SERVICES_URL)
         nmi_error = None
     except Exception as exc:
         nmi_obs = pd.DataFrame(columns=["date", "value"])
         nmi_latest = pd.DataFrame()
-        nmi_error = exc
-
-    try:
-        nmi_next_release = fetch_ism_next_release_date(ISM_SERVICES_URL)
-    except Exception:
         nmi_next_release = None
+        nmi_error = exc
 
     summary_rows = [
         {
