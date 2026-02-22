@@ -384,29 +384,71 @@ def build_local_summary_row(
 
 
 def upsert_manual_value(file_path: str | Path, date_value: dt.date, numeric_value: float) -> None:
-    raw = pd.read_csv(file_path, sep=r"\t+|\s{2,}", engine="python", dtype=str)
-    if raw.shape[1] < 2:
-        raise RuntimeError(f"Datei {file_path} enthält nicht genug Spalten.")
+    """
+    Upsert (insert/update) a single monthly observation into a local 2-column text file.
 
-        records.append({"date": parsed_date.normalize(), "value": float(parsed_value)})
+    Behaviour:
+      - Reads the first two columns (date, value) from `file_path`.
+      - Removes any existing row(s) in the same month as `date_value`.
+      - Appends the new (date, value) and writes the file back (tab-separated).
+      - Preserves the original header names if the file already has a header.
+    """
+    file_path = Path(file_path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
 
-    work = pd.DataFrame(records)
-    if work.empty:
+    date_ts = pd.Timestamp(date_value).normalize()
+    target_month = date_ts.to_period("M")
+
+    date_col = "date"
+    value_col = "value"
+
+    if file_path.exists() and file_path.stat().st_size > 0:
+        raw = pd.read_csv(file_path, sep=r"\t+|\s{2,}", engine="python", dtype=str)
+        if raw.shape[1] < 2:
+            raise RuntimeError(f"Datei {file_path} enthält nicht genug Spalten.")
+
+        c0 = str(raw.columns[0]).strip()
+        c1 = str(raw.columns[1]).strip()
+
+        c0_dt = pd.to_datetime(c0, errors="coerce")
+        c1_num = pd.to_numeric(c1.replace(",", "."), errors="coerce")
+        header_is_data = pd.notna(c0_dt) and pd.notna(c1_num)
+
+        if header_is_data:
+            raw = pd.read_csv(
+                file_path,
+                sep=r"\t+|\s{2,}",
+                engine="python",
+                dtype=str,
+                header=None,
+            )
+            raw = raw.iloc[:, :2].copy()
+            raw.columns = [date_col, value_col]
+        else:
+            date_col, value_col = c0, c1
+            raw = raw.iloc[:, :2].copy()
+
+        parsed_dates = pd.to_datetime(raw.iloc[:, 0], errors="coerce").dt.normalize()
+        value_str = raw.iloc[:, 1].astype(str).str.strip().str.replace(",", ".", regex=False)
+        parsed_values = pd.to_numeric(value_str, errors="coerce")
+
+        work = pd.DataFrame({"date": parsed_dates, "value": parsed_values})
+        work = work.dropna(subset=["date", "value"]).sort_values("date")
+    else:
         work = pd.DataFrame(columns=["date", "value"])
 
-    target_month = pd.Timestamp(date_value).to_period("M")
     if not work.empty:
         work = work[work["date"].dt.to_period("M") != target_month]
 
     work = pd.concat(
         [
             work,
-            pd.DataFrame(
-                [{"date": pd.Timestamp(date_value).normalize(), "value": float(numeric_value)}]
-            ),
+            pd.DataFrame([{"date": date_ts, "value": float(numeric_value)}]),
         ],
         ignore_index=True,
     ).sort_values("date")
+
+    work = work.drop_duplicates(subset=["date"], keep="last")
 
     with file_path.open("w", encoding="utf-8") as f:
         f.write(f"{date_col}\t{value_col}\n")
