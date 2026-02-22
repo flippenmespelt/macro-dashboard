@@ -642,20 +642,117 @@ st.title("Macro Dashboard – Philly Fed RTDSM (Diagonal Vintage)")
 st.caption("Quelle")
 st.markdown(f"{EXCEL_URL}")
 
+
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+def build_gdp_calc() -> tuple[pd.DataFrame, pd.DataFrame]:
+    matrix_local = load_vintage_matrix()
+    calc_local = compute_diagonal_delta(matrix_local, lag_quarters=1)
+
+    window_q = 20 * 4
+    z, z_med, z_mad, z_denom = rolling_robust_z(calc_local["delta"], window_q)
+    calc_local["robust_z_20y_delta"] = z
+    calc_local["z_median_20y"] = z_med
+    calc_local["z_mad_20y"] = z_mad
+    calc_local["z_denom_20y"] = z_denom
+    return matrix_local, calc_local
+
+
+@st.cache_data(ttl=60 * 60, show_spinner=False)
+def load_ffr_series() -> pd.DataFrame:
+    obs = fetch_fred_series_observations("FEDFUNDS")
+    return add_yoy_absolute_change(obs, periods=12)
+
+
+@st.cache_data(ttl=60 * 60, show_spinner=False)
+def load_m2_series() -> pd.DataFrame:
+    obs = fetch_fred_series_observations("M2SL")
+    obs = obs.dropna(subset=["value"]).sort_values("date")
+    obs["yoy_pct"] = (obs["value"] / obs["value"].shift(12) - 1) * 100
+
+    window_m = 20 * 12
+    m2_z, m2_med, m2_mad, m2_denom = rolling_robust_z(obs["yoy_pct"], window_m)
+    obs["robust_z_20y_yoy"] = m2_z
+    obs["z_median_20y_yoy"] = m2_med
+    obs["z_mad_20y_yoy"] = m2_mad
+    obs["z_denom_20y_yoy"] = m2_denom
+    return obs
+
+
+@st.cache_data(ttl=30 * 60, show_spinner=False)
+def fetch_forexfactory_latest_umcsent() -> tuple[pd.Timestamp, float] | None:
+    url = "https://www.forexfactory.com/calendar/54-us-revised-uom-consumer-sentiment"
+    response = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+    response.raise_for_status()
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    text = " ".join(soup.get_text(" ").split())
+    idx = text.lower().find("revised uom consumer sentiment")
+    if idx < 0:
+        return None
+
+    context = text[max(0, idx - 400) : idx + 700]
+    value_match = re.search(r"Actual\s*([0-9]+(?:\.[0-9]+)?)", context, re.IGNORECASE)
+    if not value_match:
+        return None
+
+    date_match = re.search(
+        r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:,\s*\d{4})?",
+        context,
+        re.IGNORECASE,
+    )
+    if not date_match:
+        return None
+
+    date_text = date_match.group(0)
+    if re.search(r"\d{4}", date_text):
+        parsed_date = pd.to_datetime(date_text, errors="coerce")
+    else:
+        current_year = pd.Timestamp.now().year
+        parsed_date = pd.to_datetime(f"{date_text}, {current_year}", errors="coerce")
+        if pd.notna(parsed_date) and parsed_date > pd.Timestamp.now() + pd.Timedelta(days=35):
+            parsed_date = parsed_date.replace(year=current_year - 1)
+
+    if pd.isna(parsed_date):
+        return None
+
+    return parsed_date.normalize(), float(value_match.group(1))
+
+
+@st.cache_data(ttl=60 * 60, show_spinner=False)
+def load_umcsent_series() -> tuple[pd.DataFrame, bool]:
+    obs = fetch_fred_series_observations("UMCSENT")
+    obs = obs.dropna(subset=["value"]).sort_values("date")
+    added_from_forexfactory = False
+
+    try:
+        ff_latest = fetch_forexfactory_latest_umcsent()
+    except Exception:
+        ff_latest = None
+
+    if ff_latest is not None and not obs.empty:
+        ff_date, ff_value = ff_latest
+        fred_last_date = pd.Timestamp(obs["date"].max()).normalize()
+        if ff_date > fred_last_date:
+            obs = pd.concat(
+                [obs, pd.DataFrame([{"date": ff_date, "value": float(ff_value)}])],
+                ignore_index=True,
+            ).sort_values("date")
+            obs = obs.drop_duplicates(subset=["date"], keep="last")
+            added_from_forexfactory = True
+
+    obs = add_yoy_absolute_change(obs, periods=12)
+    stats = rolling_normal_stats(obs["yoy_abs"], window=20 * 12)
+    obs["mean_20y_yoy_abs"] = stats["mean"]
+    obs["std_20y_yoy_abs"] = stats["std"]
+    obs["zscore_20y_yoy_abs"] = stats["zscore"]
+    return obs, added_from_forexfactory
+
+
 try:
-    matrix = load_vintage_matrix()
+    matrix, calc = build_gdp_calc()
 except Exception as e:
     st.error(f"Fehler beim Laden/Parsen der Excel-Datei: {e}")
     st.stop()
-
-calc = compute_diagonal_delta(matrix, lag_quarters=1)
-
-WINDOW_Q = 20 * 4  # 20 Jahre
-z, z_med, z_mad, z_denom = rolling_robust_z(calc["delta"], WINDOW_Q)
-calc["robust_z_20y_delta"] = z
-calc["z_median_20y"] = z_med
-calc["z_mad_20y"] = z_mad
-calc["z_denom_20y"] = z_denom
 
 latest = calc.dropna(subset=["qoq_saar"]).sort_values("Date").tail(1)
 if latest.empty:
@@ -746,39 +843,51 @@ else:
         }
     ]
 
-    if not ffr_latest.empty:
-        summary_rows.append(
-            {
-                "Serie": "FFR",
-                "Letztes Datum": ffr_latest["date"].iloc[0].date(),
-                "Aktuell": float(ffr_latest["value"].iloc[0]),
-                "Z-Score": float("nan"),
-                "Next Release": ffr_next_release if ffr_next_release else "siehe FRED Series Page",
-                "Einheit": "% p.a.",
-                "YoY absolut": (
-                    float(ffr_latest["yoy_abs"].iloc[0])
-                    if pd.notna(ffr_latest["yoy_abs"].iloc[0])
-                    else float("nan")
-                ),
-            }
-        )
+    try:
+        ffr_obs_summary = load_ffr_series()
+        ffr_latest = ffr_obs_summary.dropna(subset=["value"]).tail(1)
+        ffr_next_release = fetch_fred_next_release_date_from_page("FEDFUNDS")
+        if not ffr_latest.empty:
+            summary_rows.append(
+                {
+                    "Serie": "FFR",
+                    "Letztes Datum": ffr_latest["date"].iloc[0].date(),
+                    "Aktuell": float(ffr_latest["value"].iloc[0]),
+                    "Z-Score": float("nan"),
+                    "Next Release": ffr_next_release if ffr_next_release else "siehe FRED Series Page",
+                    "Einheit": "% p.a.",
+                    "YoY absolut": (
+                        float(ffr_latest["yoy_abs"].iloc[0])
+                        if pd.notna(ffr_latest["yoy_abs"].iloc[0])
+                        else float("nan")
+                    ),
+                }
+            )
+    except Exception:
+        pass
 
-    if not m2_latest.empty:
-        summary_rows.append(
-            {
-                "Serie": "M2",
-                "Letztes Datum": m2_latest["date"].iloc[0].date(),
-                "Aktuell": float(m2_latest["yoy_pct"].iloc[0]),
-                "Z-Score": (
-                    float(m2_latest["robust_z_20y_yoy"].iloc[0])
-                    if pd.notna(m2_latest["robust_z_20y_yoy"].iloc[0])
-                    else float("nan")
-                ),
-                "Next Release": m2_next_release if m2_next_release else "siehe FRED Series Page",
-                "Einheit": "% YoY",
-                "YoY absolut": float("nan"),
-            }
-        )
+    try:
+        m2_obs_summary = load_m2_series()
+        m2_latest = m2_obs_summary.dropna(subset=["yoy_pct"]).tail(1)
+        m2_next_release = fetch_fred_next_release_date_from_page("M2SL")
+        if not m2_latest.empty:
+            summary_rows.append(
+                {
+                    "Serie": "M2",
+                    "Letztes Datum": m2_latest["date"].iloc[0].date(),
+                    "Aktuell": float(m2_latest["yoy_pct"].iloc[0]),
+                    "Z-Score": (
+                        float(m2_latest["robust_z_20y_yoy"].iloc[0])
+                        if pd.notna(m2_latest["robust_z_20y_yoy"].iloc[0])
+                        else float("nan")
+                    ),
+                    "Next Release": m2_next_release if m2_next_release else "siehe FRED Series Page",
+                    "Einheit": "% YoY",
+                    "YoY absolut": float("nan"),
+                }
+            )
+    except Exception:
+        pass
 
     if not umcsent_latest.empty:
         summary_rows.append(
@@ -830,17 +939,16 @@ else:
 
     if event and event.selection and event.selection.cells:
         first_cell = event.selection.cells[0]
-        if isinstance(first_cell, dict):
-            new_row_idx = first_cell.get("row")
-        elif isinstance(first_cell, (tuple, list)) and first_cell:
-            new_row_idx = first_cell[0]
-        else:
-            new_row_idx = None
-
+        new_row_idx = first_cell.get("row") if isinstance(first_cell, dict) else None
         if isinstance(new_row_idx, int) and 0 <= new_row_idx < len(summary):
             if st.session_state.get("summary_selected_row_idx") != new_row_idx:
                 st.session_state["summary_selected_row_idx"] = new_row_idx
                 st.rerun()
+
+    selected = "GDP"
+    idx = st.session_state.get("summary_selected_row_idx")
+    if isinstance(idx, int) and 0 <= idx < len(summary):
+        selected = summary.iloc[idx]["Serie"]
 
     st.caption(f"Quelle Next Release GDP: {BEA_SCHEDULE_URL}")
     st.caption("Quelle FFR & Next Release: https://fred.stlouisfed.org/series/FEDFUNDS")
@@ -849,57 +957,45 @@ else:
     st.caption(f"Quelle ISM PMI & Next Release: {ISM_PMI_URL}")
     st.caption(f"Quelle ISM Services (NMI) & Next Release: {ISM_SERVICES_URL}")
 
-    selected = "GDP"
-    if event and event.selection and event.selection.cells:
-        first_cell = event.selection.cells[0]
-        if isinstance(first_cell, dict):
-            row_idx = first_cell.get("row")
-        elif isinstance(first_cell, (tuple, list)) and first_cell:
-            row_idx = first_cell[0]
-        else:
-            row_idx = None
-
-        if isinstance(row_idx, int) and 0 <= row_idx < len(summary):
-            st.session_state["summary_selected_row_idx"] = row_idx
-            selected = summary.iloc[row_idx]["Serie"]
-
     st.divider()
     if selected == "FFR":
         st.header("FFR Details")
-        if ffr_error:
-            st.warning(f"FFR konnte nicht geladen werden: {ffr_error}")
-        elif ffr_obs.empty:
-            st.warning("FFR-Zeitreihe enthält keine Werte.")
-        else:
-            st.subheader("FFR Verlauf (FEDFUNDS)")
-            st.line_chart(ffr_obs.set_index("date")["value"])
-            st.subheader("FFR YoY absolut (Differenz zu vor 12 Monaten)")
-            st.markdown("**Formel:** `YoY absolut = value_t - value_(t-12)`")
-            st.line_chart(ffr_obs.set_index("date")["yoy_abs"])
-            st.dataframe(ffr_obs, use_container_width=True)
+        try:
+            ffr_obs = load_ffr_series()
+            if ffr_obs.empty:
+                st.warning("FFR-Zeitreihe enthält keine Werte.")
+            else:
+                st.subheader("FFR Verlauf (FEDFUNDS)")
+                st.line_chart(ffr_obs.set_index("date")["value"])
+                st.subheader("FFR YoY absolut (Differenz zu vor 12 Monaten)")
+                st.markdown("**Formel:** `YoY absolut = value_t - value_(t-12)`")
+                st.line_chart(ffr_obs.set_index("date")["yoy_abs"])
+                st.dataframe(ffr_obs, use_container_width=True)
+        except Exception as exc:
+            st.warning(f"FFR konnte nicht geladen werden: {exc}")
     elif selected == "M2":
         st.header("M2 Details")
-        if m2_error:
-            st.warning(f"M2 konnte nicht geladen werden: {m2_error}")
-        elif m2_obs.empty:
-            st.warning("M2-Zeitreihe enthält keine Werte.")
-        else:
-            st.subheader("M2 YoY Change (%)")
-            st.markdown("**Formel:** `YoY (%) = ((value_t / value_(t-12)) - 1) * 100`")
-            st.line_chart(m2_obs.set_index("date")["yoy_pct"])
+        try:
+            m2_obs = load_m2_series()
+            if m2_obs.empty:
+                st.warning("M2-Zeitreihe enthält keine Werte.")
+            else:
+                st.subheader("M2 YoY Change (%)")
+                st.markdown("**Formel:** `YoY (%) = ((value_t / value_(t-12)) - 1) * 100`")
+                st.line_chart(m2_obs.set_index("date")["yoy_pct"])
 
-            st.subheader("Robuster Z-Score (20 Jahre) auf YoY (%)")
-            st.markdown(
-                "**Formel:** `Robust Z_t = (YoY_t - Median(t-240 bis t-1)) / (1.4826 * MAD(t-240 bis t-1))`"
-            )
-            st.line_chart(m2_obs.set_index("date")["robust_z_20y_yoy"])
+                st.subheader("Robuster Z-Score (20 Jahre) auf YoY (%)")
+                st.markdown(
+                    "**Formel:** `Robust Z_t = (YoY_t - Median(t-240 bis t-1)) / (1.4826 * MAD(t-240 bis t-1))`"
+                )
+                st.line_chart(m2_obs.set_index("date")["robust_z_20y_yoy"])
 
-            st.dataframe(
-                m2_obs[["date", "value", "yoy_pct", "robust_z_20y_yoy"]],
-                use_container_width=True,
-            )
+                st.dataframe(m2_obs[["date", "value", "yoy_pct", "robust_z_20y_yoy"]], use_container_width=True)
+        except Exception as exc:
+            st.warning(f"M2 konnte nicht geladen werden: {exc}")
     elif selected == "ISM":
         st.header("ISM Details")
+        ism_obs, _, _, ism_error = load_sheet_index_bundle(ISM_SERIES_SLUG)
         if ism_error:
             st.warning(f"ISM konnte nicht geladen werden: {ism_error}")
         elif ism_obs.empty:
@@ -913,17 +1009,7 @@ else:
             )
             st.line_chart(ism_obs.set_index("date")["zscore_20y_level"])
             st.dataframe(
-                ism_obs[
-                    [
-                        "date",
-                        "value",
-                        "mean_20y_level",
-                        "std_20y_level",
-                        "zscore_20y_level",
-                        "kurtosis_20y_level",
-                        "skewness_20y_level",
-                    ]
-                ],
+                ism_obs[["date", "value", "mean_20y_level", "std_20y_level", "zscore_20y_level", "kurtosis_20y_level", "skewness_20y_level"]],
                 use_container_width=True,
             )
         render_manual_entry_form(
@@ -967,6 +1053,7 @@ else:
             )
     elif selected == "NMI":
         st.header("NMI Details")
+        nmi_obs, _, _, nmi_error = load_sheet_index_bundle(NMI_SERIES_SLUG)
         if nmi_error:
             st.warning(f"NMI konnte nicht geladen werden: {nmi_error}")
         elif nmi_obs.empty:
@@ -980,25 +1067,10 @@ else:
             )
             st.line_chart(nmi_obs.set_index("date")["zscore_20y_level"])
             st.dataframe(
-                nmi_obs[
-                    [
-                        "date",
-                        "value",
-                        "mean_20y_level",
-                        "std_20y_level",
-                        "zscore_20y_level",
-                        "kurtosis_20y_level",
-                        "skewness_20y_level",
-                    ]
-                ],
+                nmi_obs[["date", "value", "mean_20y_level", "std_20y_level", "zscore_20y_level", "kurtosis_20y_level", "skewness_20y_level"]],
                 use_container_width=True,
             )
-        render_manual_entry_form(
-            "NMI",
-            NMI_SERIES_SLUG,
-            nmi_obs,
-            "https://www.forexfactory.com/calendar/253-us-ism-services-pmi",
-        )
+        render_manual_entry_form("NMI", NMI_SERIES_SLUG, nmi_obs, "https://www.forexfactory.com/calendar/253-us-ism-services-pmi")
     else:
         st.header("GDP Details")
         st.subheader("RGDP QoQ SAAR")
@@ -1013,16 +1085,7 @@ else:
 
         st.subheader("Berechnete Tabelle")
         st.dataframe(
-            calc[
-                [
-                    "Date",
-                    "Vintage_used",
-                    "Previous_value",
-                    "Current_value",
-                    "delta",
-                    "robust_z_20y_delta",
-                ]
-            ].rename(
+            calc[["Date", "Vintage_used", "Previous_value", "Current_value", "delta", "robust_z_20y_delta"]].rename(
                 columns={
                     "Date": "Datum",
                     "Vintage_used": "Vintage (genutzt)",
