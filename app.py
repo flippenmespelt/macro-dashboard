@@ -699,6 +699,34 @@ else:
         m2_next_release = None
         m2_error = exc
 
+    try:
+        umcsent_obs = fetch_fred_series_observations("UMCSENT")
+        umcsent_obs = umcsent_obs.dropna(subset=["value"]).sort_values("date")
+        umcsent_obs = add_yoy_absolute_change(umcsent_obs, periods=12)
+
+        umcsent_stats = rolling_normal_stats(umcsent_obs["yoy_abs"], window=20 * 12)
+        umcsent_obs["mean_20y_yoy_abs"] = umcsent_stats["mean"]
+        umcsent_obs["std_20y_yoy_abs"] = umcsent_stats["std"]
+        umcsent_obs["zscore_20y_yoy_abs"] = umcsent_stats["zscore"]
+
+        umcsent_latest = umcsent_obs.dropna(subset=["value"]).tail(1)
+        umcsent_next_release = fetch_fred_next_release_date_from_page("UMCSENT")
+        umcsent_error = None
+    except Exception as exc:
+        umcsent_obs = pd.DataFrame(
+            columns=[
+                "date",
+                "value",
+                "yoy_abs",
+                "mean_20y_yoy_abs",
+                "std_20y_yoy_abs",
+                "zscore_20y_yoy_abs",
+            ]
+        )
+        umcsent_latest = pd.DataFrame()
+        umcsent_next_release = None
+        umcsent_error = exc
+
     ism_obs, ism_latest, ism_next_release, ism_error = load_sheet_index_bundle(ISM_SERIES_SLUG)
     nmi_obs, nmi_latest, nmi_next_release, nmi_error = load_sheet_index_bundle(NMI_SERIES_SLUG)
 
@@ -752,6 +780,29 @@ else:
             }
         )
 
+    if not umcsent_latest.empty:
+        summary_rows.append(
+            {
+                "Serie": "UMCSENT",
+                "Letztes Datum": umcsent_latest["date"].iloc[0].date(),
+                "Aktuell": float(umcsent_latest["value"].iloc[0]),
+                "Z-Score": (
+                    float(umcsent_latest["zscore_20y_yoy_abs"].iloc[0])
+                    if pd.notna(umcsent_latest["zscore_20y_yoy_abs"].iloc[0])
+                    else float("nan")
+                ),
+                "Next Release": (
+                    umcsent_next_release if umcsent_next_release else "siehe FRED Series Page"
+                ),
+                "Einheit": "Index",
+                "YoY absolut": (
+                    float(umcsent_latest["yoy_abs"].iloc[0])
+                    if pd.notna(umcsent_latest["yoy_abs"].iloc[0])
+                    else float("nan")
+                ),
+            }
+        )
+
     summary_rows.append(
         build_local_summary_row("ISM", ism_latest, ism_next_release, "siehe ISM PMI Seite")
     )
@@ -794,6 +845,7 @@ else:
     st.caption(f"Quelle Next Release GDP: {BEA_SCHEDULE_URL}")
     st.caption("Quelle FFR & Next Release: https://fred.stlouisfed.org/series/FEDFUNDS")
     st.caption("Quelle M2 & Next Release: https://fred.stlouisfed.org/series/M2SL")
+    st.caption("Quelle UMCSENT & Next Release: https://fred.stlouisfed.org/series/UMCSENT")
     st.caption(f"Quelle ISM PMI & Next Release: {ISM_PMI_URL}")
     st.caption(f"Quelle ISM Services (NMI) & Next Release: {ISM_SERVICES_URL}")
 
@@ -880,6 +932,39 @@ else:
             ism_obs,
             "https://www.forexfactory.com/calendar/252-us-ism-manufacturing-pmi",
         )
+    elif selected == "UMCSENT":
+        st.header("UMCSENT Details")
+        if umcsent_error:
+            st.warning(f"UMCSENT konnte nicht geladen werden: {umcsent_error}")
+        elif umcsent_obs.empty:
+            st.warning("UMCSENT-Zeitreihe enthält keine Werte.")
+        else:
+            st.subheader("UMCSENT Index")
+            st.line_chart(umcsent_obs.set_index("date")["value"])
+
+            st.subheader("UMCSENT YoY absolut (Differenz zu vor 12 Monaten)")
+            st.markdown("**Formel:** `YoY absolut = value_t - value_(t-12)`")
+            st.line_chart(umcsent_obs.set_index("date")["yoy_abs"])
+
+            st.subheader("Normaler Z-Score (20 Jahre) auf YoY absolut ohne Look-Ahead")
+            st.markdown(
+                "**Formel:** `Z_t = (YoY_t - Mittelwert(t-240 bis t-1)) / Standardabweichung(t-240 bis t-1)`"
+            )
+            st.line_chart(umcsent_obs.set_index("date")["zscore_20y_yoy_abs"])
+
+            st.dataframe(
+                umcsent_obs[
+                    [
+                        "date",
+                        "value",
+                        "yoy_abs",
+                        "mean_20y_yoy_abs",
+                        "std_20y_yoy_abs",
+                        "zscore_20y_yoy_abs",
+                    ]
+                ],
+                use_container_width=True,
+            )
     elif selected == "NMI":
         st.header("NMI Details")
         if nmi_error:
