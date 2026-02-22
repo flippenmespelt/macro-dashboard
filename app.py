@@ -15,6 +15,16 @@ FRED_SERIES_OBS_URL = "https://api.stlouisfed.org/fred/series/observations"
 BASE_DIR = Path(__file__).resolve().parent
 ISM_FILE_PATH = BASE_DIR / "ism.txt"
 NMI_FILE_PATH = BASE_DIR / "nmi.txt"
+# --- Google Sheets WebApp storage for manual series (ISM/NMI) ---
+# Set these in Streamlit Secrets (Settings -> Secrets on Streamlit Cloud):
+# SHEETS_WEBAPP_URL = "https://script.google.com/macros/s/.../exec"
+# SHEETS_TOKEN = "your_token"
+SHEETS_WEBAPP_URL = st.secrets.get("SHEETS_WEBAPP_URL", "")
+SHEETS_TOKEN = st.secrets.get("SHEETS_TOKEN", "")
+
+ISM_SERIES_SLUG = "ism"
+NMI_SERIES_SLUG = "nmi"
+
 ISM_PMI_URL = "https://www.ismworld.org/supply-management-news-and-reports/reports/ism-report-on-business/pmi/"
 ISM_SERVICES_URL = "https://www.ismworld.org/supply-management-news-and-reports/reports/ism-report-on-business/services/"
 
@@ -341,6 +351,59 @@ def safe_float(value) -> float:
     return float(value) if pd.notna(value) else float("nan")
 
 
+def _require_sheets_config() -> tuple[str, str]:
+    if not SHEETS_WEBAPP_URL:
+        raise RuntimeError("SHEETS_WEBAPP_URL fehlt in st.secrets.")
+    if not SHEETS_TOKEN:
+        raise RuntimeError("SHEETS_TOKEN fehlt in st.secrets.")
+    return SHEETS_WEBAPP_URL, SHEETS_TOKEN
+
+
+@st.cache_data(ttl=6 * 60 * 60)
+def load_sheet_index_series(series_slug: str) -> pd.DataFrame:
+    """Load ISM/NMI series from the deployed Apps Script WebApp (Google Sheets)."""
+    url, token = _require_sheets_config()
+    resp = requests.get(url, params={"series": series_slug, "token": token}, timeout=20)
+    resp.raise_for_status()
+    payload = resp.json()
+    if not payload.get("ok"):
+        raise RuntimeError(f"Sheets API error: {payload}")
+
+    out = pd.DataFrame(payload.get("rows", []))
+    if out.empty:
+        return pd.DataFrame(columns=["date", "value"])
+
+    out["date"] = pd.to_datetime(out["date"], errors="coerce")
+    out["value"] = pd.to_numeric(out["value"], errors="coerce")
+    out = out.dropna(subset=["date", "value"]).sort_values("date")
+    out = out.drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
+
+    stats = rolling_normal_stats(out["value"], window=20 * 12)
+    out["zscore_20y_level"] = stats["zscore"]
+    out["mean_20y_level"] = stats["mean"]
+    out["std_20y_level"] = stats["std"]
+    out["kurtosis_20y_level"] = stats["kurtosis"]
+    out["skewness_20y_level"] = stats["skewness"]
+    return out
+
+
+def upsert_sheet_value(series_slug: str, new_date: dt.date, new_value: float) -> dict:
+    """Upsert one observation (one row per month) via Apps Script WebApp."""
+    url, token = _require_sheets_config()
+    payload = {
+        "token": token,
+        "series": series_slug,
+        "date": pd.Timestamp(new_date).strftime("%Y-%m-%d"),
+        "value": float(new_value),
+    }
+    resp = requests.post(url, json=payload, timeout=20)
+    resp.raise_for_status()
+    out = resp.json()
+    if not out.get("ok"):
+        raise RuntimeError(f"Sheets API error: {out}")
+    return out
+
+
 def load_local_index_bundle(
     file_path: str | Path,
 ) -> tuple[pd.DataFrame, pd.DataFrame, str | None, Exception | None]:
@@ -349,6 +412,17 @@ def load_local_index_bundle(
         latest = obs.dropna(subset=["value"]).tail(1)
         # Die Werte sollen ausschließlich aus den lokalen Textdateien stammen.
         # Deshalb wird kein externer Request für Veröffentlichungsdaten gemacht.
+        return obs, latest, None, None
+    except Exception as exc:
+        return pd.DataFrame(columns=["date", "value"]), pd.DataFrame(), None, exc
+
+
+def load_sheet_index_bundle(
+    series_slug: str,
+) -> tuple[pd.DataFrame, pd.DataFrame, str | None, Exception | None]:
+    try:
+        obs = load_sheet_index_series(series_slug)
+        latest = obs.dropna(subset=["value"]).tail(1)
         return obs, latest, None, None
     except Exception as exc:
         return pd.DataFrame(columns=["date", "value"]), pd.DataFrame(), None, exc
@@ -458,19 +532,19 @@ def upsert_manual_value(file_path: str | Path, date_value: dt.date, numeric_valu
 
 def render_manual_entry_form(
     series_name: str,
-    file_path: str | Path,
+    series_slug: str,
     series_df: pd.DataFrame,
     source_url: str,
 ) -> None:
     st.subheader(f"{series_name} manuell ergänzen")
     st.markdown(f"Quelle zur Datenergänzung: {source_url}")
-    st.caption(f"Schreibt direkt in: `{Path(file_path).resolve()}`")
-    with st.form(f"{series_name.lower()}_manual_entry"):
+    st.caption("Schreibt ins Google Sheet (über Apps Script WebApp).")
+    with st.form(f"{series_slug}_manual_entry"):
         new_date = st.date_input(f"Datum ({series_name})", value=dt.date.today())
         new_value = st.number_input(f"Wert ({series_name})", value=50.0, step=0.1, format="%.1f")
         submit = st.form_submit_button(f"{series_name}-Wert speichern")
         if submit:
-            upsert_manual_value(file_path, new_date, new_value)
+            upsert_sheet_value(series_slug, new_date, new_value)
             st.success(f"{series_name}-Wert gespeichert (Monat wurde aktualisiert oder ergänzt).")
             st.cache_data.clear()
             st.rerun()
@@ -625,8 +699,8 @@ else:
         m2_next_release = None
         m2_error = exc
 
-    ism_obs, ism_latest, ism_next_release, ism_error = load_local_index_bundle(ISM_FILE_PATH)
-    nmi_obs, nmi_latest, nmi_next_release, nmi_error = load_local_index_bundle(NMI_FILE_PATH)
+    ism_obs, ism_latest, ism_next_release, ism_error = load_sheet_index_bundle(ISM_SERIES_SLUG)
+    nmi_obs, nmi_latest, nmi_next_release, nmi_error = load_sheet_index_bundle(NMI_SERIES_SLUG)
 
     summary_rows = [
         {
@@ -802,7 +876,7 @@ else:
             )
         render_manual_entry_form(
             "ISM",
-            ISM_FILE_PATH,
+            ISM_SERIES_SLUG,
             ism_obs,
             "https://www.forexfactory.com/calendar/252-us-ism-manufacturing-pmi",
         )
@@ -836,7 +910,7 @@ else:
             )
         render_manual_entry_form(
             "NMI",
-            NMI_FILE_PATH,
+            NMI_SERIES_SLUG,
             nmi_obs,
             "https://www.forexfactory.com/calendar/253-us-ism-services-pmi",
         )
