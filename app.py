@@ -388,21 +388,19 @@ def upsert_manual_value(file_path: str | Path, date_value: dt.date, numeric_valu
     if raw.shape[1] < 2:
         raise RuntimeError(f"Datei {file_path} enthält nicht genug Spalten.")
 
-    date_col, value_col = raw.columns[:2]
-    work = raw.iloc[:, :2].copy()
-    work.columns = ["date_raw", "value_raw"]
+        records.append({"date": parsed_date.normalize(), "value": float(parsed_value)})
 
-    work["date"] = pd.to_datetime(work["date_raw"], errors="coerce", dayfirst=False)
-    value_str = work["value_raw"].astype(str).str.strip().str.replace(",", ".", regex=False)
-    work["value"] = pd.to_numeric(value_str, errors="coerce")
-    work = work.dropna(subset=["date", "value"]).copy()
+    work = pd.DataFrame(records)
+    if work.empty:
+        work = pd.DataFrame(columns=["date", "value"])
 
     target_month = pd.Timestamp(date_value).to_period("M")
-    work = work[work["date"].dt.to_period("M") != target_month]
+    if not work.empty:
+        work = work[work["date"].dt.to_period("M") != target_month]
 
     work = pd.concat(
         [
-            work[["date", "value"]],
+            work,
             pd.DataFrame(
                 [{"date": pd.Timestamp(date_value).normalize(), "value": float(numeric_value)}]
             ),
@@ -410,7 +408,7 @@ def upsert_manual_value(file_path: str | Path, date_value: dt.date, numeric_valu
         ignore_index=True,
     ).sort_values("date")
 
-    with open(file_path, "w", encoding="utf-8") as f:
+    with file_path.open("w", encoding="utf-8") as f:
         f.write(f"{date_col}\t{value_col}\n")
         for _, row in work.iterrows():
             f.write(f"{row['date'].strftime('%Y-%m-%d')}\t{row['value']:.1f}\n")
@@ -662,6 +660,20 @@ else:
         on_select="rerun",
         selection_mode=("single-cell",),
     )
+
+    if event and event.selection and event.selection.cells:
+        first_cell = event.selection.cells[0]
+        if isinstance(first_cell, dict):
+            new_row_idx = first_cell.get("row")
+        elif isinstance(first_cell, (tuple, list)) and first_cell:
+            new_row_idx = first_cell[0]
+        else:
+            new_row_idx = None
+
+        if isinstance(new_row_idx, int) and 0 <= new_row_idx < len(summary):
+            if st.session_state.get("summary_selected_row_idx") != new_row_idx:
+                st.session_state["summary_selected_row_idx"] = new_row_idx
+                st.rerun()
 
     st.caption(f"Quelle Next Release GDP: {BEA_SCHEDULE_URL}")
     st.caption("Quelle FFR & Next Release: https://fred.stlouisfed.org/series/FEDFUNDS")
